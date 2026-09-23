@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# secrets / local config — only the template is committed
+.env
+.env.*
+!.env.example
+
+# build + test output
+coverage/
+dist/
+
+# logs
+*.log
+npm-debug.log*
+
+# OS / editor junk
+.DS_Store
+.idea/
+.vscode/
