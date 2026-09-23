@@ -1,0 +1,56 @@
+# Local infrastructure for development and integration tests.
+# Only the services the code ACTUALLY uses are here. Kafka and Qdrant get
+# added in the phases that introduce them (11 and 18).
+#
+#   npm run infra:up     # start + wait until healthy
+#   npm run infra:down   # stop (volumes are kept)
+
+name: workflow-engine
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: wf_mongo
+    # Single-node REPLICA SET, not a standalone server. MongoDB only supports
+    # multi-document transactions (needed later for the transactional outbox)
+    # and change streams on a replica set.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      # First run: rs.status() throws because the set isn't initiated yet, so
+      # we initiate it. The check only passes once this node is PRIMARY
+      # (i.e. actually accepts writes).
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "try { rs.status() } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] }) }; if (!db.hello().isWritablePrimary) quit(1)"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: wf_redis
+    # appendonly: persist writes to disk so a Redis restart doesn't lose queues.
+    # noeviction: when memory is full, REJECT writes instead of silently
+    #   deleting keys. Evicting a queue entry would lose a task.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mongo_data:
+  redis_data:
