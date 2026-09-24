@@ -8,7 +8,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 2 | Authentication + RBAC | ✅ |
 | 3 | Workflow and task domain models | ✅ |
 | 4 | DAG validation | ✅ |
-| 5 | Workflow execution engine | ⬜ |
+| 5 | Workflow execution engine | ✅ |
 | 6 | Redis task scheduling | ⬜ |
 | 7 | Distributed workers | ⬜ |
 | 8 | Concurrency + retries + backoff | ⬜ |
@@ -125,3 +125,39 @@ the update path — each caught by failing tests, then reverted.
 
 **Smoke-tested**: the brief's document pipeline validates with `classify` and `retrieve` in the same parallel
 level; a body with three different graph errors returns all three messages.
+
+## Phase 5 — Workflow execution engine ✅
+
+**Implemented**
+- `src/workflow/engine.js`: `startExecution` (one transaction: execution + all tasks), `dispatchReady`,
+  `startTask`, `completeTask` / `failTask` (transactions), `reconcileStuckReady`, `recoverInProcessOrphans`
+- `pendingTasks` counter on the execution to prevent write skew between concurrently finishing last tasks
+- Fail-fast failure policy; timeouts with AbortSignal; attempt history in `TaskExecution`
+- Data flow: handlers get `{ config, input, parents, signal }`
+- In-process executor with a concurrency limit and graceful stop (`src/workflow/inProcessExecutor.js`)
+- Built-in handlers: noop, delay, fail, echo
+- API: `POST /workflows/:id/run` (202 + Location), `GET /executions/:id`, both owner-scoped
+- Reconciler interval + startup orphan recovery wired into `server.js`; executor drained on shutdown
+
+**Tests**: 183 total (33 new), suite run 4x with no flaky failures. Includes: diamond race (5 rounds, D dispatched
+once), write-skew race (5 rounds), duplicate and stale reports, rollback of a half-created run, fail-fast, reconciler
+vs dispatch race, restart recovery with fencing, and an HTTP end-to-end test that asserts B and C overlapped in time
+and D started after both.
+
+**Mutation check**: removing fencing, the dispatch CAS, or the start transaction were each caught. The naive
+count-based completion check was shown to leave the execution stuck RUNNING (write skew). **One mutant survived**:
+removing the "execution still RUNNING" guard before promoting children. It's redundant today, because fail-fast has
+already cancelled every PENDING task and promotion only matches PENDING. It's kept as defence in depth and noted here
+honestly.
+
+**Bugs found**
+- Mongoose `minimize` silently dropped empty objects from task outputs (`{ config: {} }` became `{}`). Fixed with
+  `minimize: false` on tasks; caught by the e2e test.
+- Mongoose 9 deprecates `{ new: true }`; replaced with `returnDocument: "after"` everywhere.
+
+**Smoke-tested**: a real run completes; `kill -9` during B/C followed by a restart re-runs them as attempt 2 and the
+execution completes.
+
+**Known limitations (by design for this phase)**: tasks run inside the API process (Redis queue in Phase 6, workers
+in Phase 7); no retries (Phase 8); orphan recovery is only correct with a single executing process (Phase 10 leases);
+no pause/resume/cancel endpoints yet; no idempotency key on `/run` (a double click starts two runs, Phase 9).

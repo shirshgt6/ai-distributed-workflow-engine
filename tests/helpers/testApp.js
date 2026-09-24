@@ -9,6 +9,13 @@ import { createWorkflowService } from "../../src/services/workflow.service.js";
 import { hashPassword } from "../../src/auth/password.js";
 import { User } from "../../src/models/user.model.js";
 import { Workflow } from "../../src/models/workflow.model.js";
+import { WorkflowExecution } from "../../src/models/workflowExecution.model.js";
+import { Task } from "../../src/models/task.model.js";
+import { TaskExecution } from "../../src/models/taskExecution.model.js";
+import { createEngine } from "../../src/workflow/engine.js";
+import { createInProcessExecutor } from "../../src/workflow/inProcessExecutor.js";
+import { createExecutionService } from "../../src/services/execution.service.js";
+import { handlers } from "../../src/handlers/index.js";
 
 export const MONGO_URI =
   process.env.MONGO_URI_TEST ?? "mongodb://localhost:27018/workflow_engine_test?directConnection=true";
@@ -27,6 +34,36 @@ export function createTestApp() {
   const authService = createAuthService({ User, tokens, bcryptCost: BCRYPT_COST });
   const workflowService = createWorkflowService({ Workflow });
   return createApp({ logger, auth: { authService, tokens }, workflowService });
+}
+
+/**
+ * Full stack including the engine and a real in-process executor, for
+ * end-to-end tests. Call `executor.stop()` in afterAll.
+ */
+export function createTestStack({ concurrency = 4 } = {}) {
+  const authService = createAuthService({ User, tokens, bcryptCost: BCRYPT_COST });
+  const workflowService = createWorkflowService({ Workflow });
+  const executor = createInProcessExecutor({ handlers, concurrency, logger });
+  const engine = createEngine({
+    models: { WorkflowExecution, Task, TaskExecution },
+    enqueue: (item) => executor.enqueue(item),
+    logger,
+  });
+  executor.attach(engine);
+  const executionService = createExecutionService({ Workflow, WorkflowExecution, Task, engine });
+  const app = createApp({ logger, auth: { authService, tokens }, workflowService, executionService });
+  return { app, engine, executor };
+}
+
+/** Poll until fn() returns a truthy value (or time out). */
+export async function waitFor(fn, { timeoutMs = 5000, intervalMs = 25 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await fn();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error("waitFor: timed out");
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
 /** Creates a user directly in the DB and returns { user, token }. */

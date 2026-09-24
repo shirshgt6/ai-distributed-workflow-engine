@@ -1,7 +1,7 @@
 # Workflow Engine
 
-> **Implemented so far (Phases 3–4):** state machines, the conditional transition primitive, the data model, and DAG validation.
-> **Not implemented yet:** execution and dependency resolution (Phase 5), queueing and workers (Phases 6–7).
+> **Implemented so far (Phases 3–5):** state machines, the conditional transition primitive, the data model, DAG validation, and **execution** (dependency resolution, fail-fast, reconciliation) with an **in-process executor**.
+> **Not implemented yet:** a Redis queue (Phase 6), separate worker processes (Phase 7), retries (Phase 8), pause/resume/cancel, and lease-based crash recovery (Phase 10).
 
 ## Definition vs execution
 
@@ -91,3 +91,60 @@ criticalPathLength: 6   (classify and retrieve can run in parallel)
 ```
 
 "Critical path" here counts tasks, not time. The time-weighted critical path (using real durations) needs measured task latencies and isn't computed yet.
+
+## Execution (`src/workflow/engine.js`), Phase 5
+
+There's no central orchestrator process. The engine is a set of functions, and all state lives in MongoDB.
+Whoever finishes a task runs `completeTask()`, which works out what became ready.
+
+```
+POST /workflows/:id/run
+  └─ startExecution   [TRANSACTION] create execution (RUNNING, pendingTasks = n) + n Task docs
+                      roots -> READY, others -> PENDING (remainingDeps = #dependencies)
+  └─ dispatchReady    READY -> QUEUED (CAS) -> enqueue(task)          (after commit)
+executor
+  └─ startTask        QUEUED -> RUNNING (CAS), attempt+1, leaseToken+1, TaskExecution record
+  └─ handler({ config, input, parents, signal })   with timeout
+  └─ completeTask     [TRANSACTION]
+        RUNNING -> COMPLETED   only if still RUNNING with this leaseToken  (duplicate/stale = no-op)
+        execution.pendingTasks -= 1
+        children.remainingDeps -= 1; PENDING & remainingDeps 0 -> READY   (only while execution RUNNING)
+        pendingTasks == 0 -> execution COMPLETED
+     └─ dispatchReady (after commit)
+  └─ failTask         [TRANSACTION]  fail-fast (see below)
+```
+
+### Races and how each is handled
+| Scenario | What would go wrong | Mechanism | Test |
+|---|---|---|---|
+| Crash while creating a run | execution without all its tasks (zombie) | one transaction for execution + tasks | rollback test |
+| B and C complete at once (diamond) | D decremented wrongly, promoted or dispatched twice | both txns write D and the execution doc, MongoDB write conflict, automatic retry | 5 rounds, D dispatched exactly once |
+| X and Y are both last tasks and finish at once | **write skew**: each snapshot sees the other RUNNING, so nobody completes the execution | `pendingTasks` counter on the execution doc, so both txns write the same doc and conflict | 5 rounds, execution COMPLETED. The naive count-based version was shown to leave it RUNNING |
+| Duplicate completion report | double decrement, child released early | RUNNING -> COMPLETED CAS inside the txn; the second call matches nothing | duplicate test |
+| Late report from an old attempt | overwrites a newer attempt | `leaseToken` fencing | stale-token test |
+| Normal dispatch and reconciler at once | task enqueued twice | READY -> QUEUED CAS | race test |
+
+**Trade-off:** every task completion in one execution writes the same execution document, so completions
+within one run are serialised by write conflicts and retries. That's fine for ≤ 100 tasks per run. At much
+larger fan-out, the counter could be sharded or completion checked asynchronously.
+
+### Failure policy: fail-fast
+When a task fails (no retries until Phase 8):
+- the task becomes FAILED
+- all tasks not yet started (PENDING, READY, QUEUED) become CANCELLED
+- the execution becomes FAILED immediately, with `error = 'Task "<key>" failed: <message>'`
+- tasks already RUNNING are allowed to finish. Their results are recorded, but nothing new is promoted.
+
+Timeouts (`withTimeout` plus an `AbortSignal` passed to the handler) are failures recorded as `TIMED_OUT` attempts.
+
+### Recovery
+- **Stuck READY** (commit succeeded, process died before dispatch): `reconcileStuckReady` runs every `RECONCILE_INTERVAL_MS` and dispatches READY tasks older than `RECONCILE_STALE_MS`.
+- **Process restart (single-process mode only):** the in-process queue is in memory, so on boot `recoverInProcessOrphans` moves RUNNING tasks to QUEUED (bumping `leaseToken` to fence the dead attempt), then QUEUED to READY, and dispatches them again. This is **only correct while exactly one process executes tasks**. Phase 10 replaces it with lease expiry.
+- **Smoke-tested:** a run was killed with `kill -9` while B and C were RUNNING. After restart, both re-ran as attempt 2, D ran, and the execution completed.
+
+### Data flow
+Handlers receive `{ config, input, parents, signal }`, where `parents` is `{ parentKey: parentOutput }` and `input`
+is the run's input. The output is stored on the task. Task documents use `minimize: false` so outputs round-trip
+exactly (Mongoose would otherwise drop empty objects).
+
+Built-in handlers (for exercising the engine): `noop`, `delay` (`config.ms` ≤ 60s, abortable), `fail`, `echo`.

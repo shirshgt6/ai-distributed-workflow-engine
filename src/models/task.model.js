@@ -41,12 +41,18 @@ const taskSchema = new Schema(
 
     output: { type: Schema.Types.Mixed, default: null },
     error: { type: String, default: null },
-    readyAt: { type: Date, default: null },
+    readyAt: { type: Date, default: null }, // when it became READY (reconciler finds stuck ones)
+    queuedAt: { type: Date, default: null }, // when it was handed to the executor
     startedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
   },
   {
     timestamps: true,
+    // Mongoose drops EMPTY objects on save by default (minimize: true), so a
+    // handler output like { config: {} } was stored as {} — silently losing
+    // a key that downstream tasks might read. Task config/output are user
+    // data and must round-trip exactly. (Caught by the Phase 5 e2e test.)
+    minimize: false,
     toJSON: {
       transform(_doc, ret) {
         ret.id = String(ret._id);
@@ -65,5 +71,7 @@ taskSchema.index({ executionId: 1, key: 1 }, { unique: true });
 taskSchema.index({ executionId: 1, status: 1 });
 // Recovery sweeper: "RUNNING tasks whose lease has expired" (Phase 10).
 taskSchema.index({ status: 1, leaseExpiresAt: 1 });
+// Reconciler: "READY tasks nobody dispatched" (crash between commit and dispatch).
+taskSchema.index({ status: 1, readyAt: 1 });
 
 export const Task = mongoose.model("Task", taskSchema);

@@ -9,6 +9,13 @@ import { createAuthService } from "./services/auth.service.js";
 import { User } from "./models/user.model.js";
 import { Workflow } from "./models/workflow.model.js";
 import { createWorkflowService } from "./services/workflow.service.js";
+import { WorkflowExecution } from "./models/workflowExecution.model.js";
+import { Task } from "./models/task.model.js";
+import { TaskExecution } from "./models/taskExecution.model.js";
+import { createEngine } from "./workflow/engine.js";
+import { createInProcessExecutor } from "./workflow/inProcessExecutor.js";
+import { createExecutionService } from "./services/execution.service.js";
+import { handlers } from "./handlers/index.js";
 
 // Composition root: the ONE place that reads config, creates real
 // connections and wires them into the app. Everything else receives its
@@ -30,6 +37,25 @@ async function main() {
   const authService = createAuthService({ User, tokens, bcryptCost: config.auth.bcryptCost });
   const workflowService = createWorkflowService({ Workflow });
 
+  // Engine <-> executor reference each other: the engine enqueues into the
+  // executor, the executor reports results to the engine.
+  const executor = createInProcessExecutor({ handlers, concurrency: config.executor.concurrency, logger });
+  const engine = createEngine({
+    models: { WorkflowExecution, Task, TaskExecution },
+    enqueue: (item) => executor.enqueue(item),
+    logger,
+  });
+  executor.attach(engine);
+  const executionService = createExecutionService({ Workflow, WorkflowExecution, Task, engine });
+
+  // Anything this process was running/queueing before a crash is an orphan now.
+  await engine.recoverInProcessOrphans();
+  const reconcileTimer = setInterval(() => {
+    engine
+      .reconcileStuckReady({ staleMs: config.reconciler.staleMs })
+      .catch((err) => logger.error({ err: err.message }, "reconciler run failed"));
+  }, config.reconciler.intervalMs);
+
   let shuttingDown = false;
 
   const app = createApp({
@@ -42,6 +68,7 @@ async function main() {
     isShuttingDown: () => shuttingDown,
     auth: { authService, tokens },
     workflowService,
+    executionService,
   });
 
   const server = app.listen(config.port, () => {
@@ -76,6 +103,10 @@ async function main() {
     forceExit.unref(); // this timer alone must not keep the process alive
 
     await new Promise((resolve) => server.close(resolve));
+    clearInterval(reconcileTimer);
+    // Let running task handlers finish and REPORT before the DB connection
+    // closes; otherwise their results would be lost.
+    await executor.stop();
     await Promise.allSettled([disconnectMongo(), redis.quit()]);
 
     logger.info("shutdown complete");

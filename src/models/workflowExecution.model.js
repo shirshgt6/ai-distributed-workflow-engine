@@ -18,6 +18,20 @@ const workflowExecutionSchema = new Schema(
       default: EXECUTION_STATUS.PENDING,
     },
     input: { type: Schema.Types.Mixed, default: {} },
+
+    taskCount: { type: Number, required: true },
+    // How many tasks have not finished yet (finished = COMPLETED, FAILED or
+    // CANCELLED). Decremented with $inc in the SAME transaction that
+    // finishes a task.
+    //
+    // Why a counter instead of "count unfinished tasks" at the end of each
+    // transaction? WRITE SKEW: two last tasks X and Y finishing concurrently
+    // each write only their OWN task document, each reads a snapshot where
+    // the other is still RUNNING, and neither marks the execution COMPLETED
+    // -> stuck RUNNING forever. With the counter, both transactions write
+    // THIS document, MongoDB detects the write conflict, one retries with
+    // fresh data, sees 0, and completes the execution.
+    pendingTasks: { type: Number, required: true },
     triggeredBy: { type: Schema.Types.ObjectId, ref: "User" },
     startedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },

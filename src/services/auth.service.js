@@ -104,7 +104,7 @@ export function createAuthService({ User, tokens, bcryptCost }) {
       const user = await User.findByIdAndUpdate(
         targetId,
         { $set: { role }, $inc: { tokenVersion: 1 } },
-        { new: true, runValidators: true }
+        { returnDocument: "after", runValidators: true }
       );
       if (!user) throw new NotFoundError("User not found");
       return user;

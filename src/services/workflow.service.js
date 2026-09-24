@@ -81,7 +81,7 @@ export function createWorkflowService({ Workflow }) {
       const updated = await Workflow.findOneAndUpdate(
         { _id: id, ...ownerScope(user), version },
         { $set: { name, description, tasks }, $inc: { version: 1 } },
-        { new: true, runValidators: true }
+        { returnDocument: "after", runValidators: true }
       );
       if (updated) return updated;
 

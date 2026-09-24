@@ -1,5 +1,5 @@
 import { Task } from "../models/task.model.js";
-import { assertTransition } from "../workflow/states.js";
+import { assertTransition, TASK_STATUS } from "../workflow/states.js";
 
 /**
  * Move a task from `from` to `to` — atomically, and only if it is STILL in
@@ -29,4 +29,27 @@ export async function transitionTask(taskId, from, to, { set = {}, inc, where = 
 
   const result = await Task.updateOne({ ...where, _id: taskId, status: from }, update, { session });
   return result.modifiedCount === 1;
+}
+
+/**
+ * A worker claims a QUEUED task: QUEUED -> RUNNING, in ONE atomic update that
+ * also increments `attempt` and the fencing `leaseToken`.
+ *
+ * Returns the updated task (with the NEW leaseToken the worker must present
+ * when it reports the result), or null if the task is no longer QUEUED —
+ * cancelled, or already claimed by someone else. null means "skip it".
+ *
+ * @param {import('mongoose').Types.ObjectId|string} taskId
+ * @param {string} workerId
+ */
+export async function claimQueuedTask(taskId, workerId) {
+  assertTransition("task", TASK_STATUS.QUEUED, TASK_STATUS.RUNNING);
+  return Task.findOneAndUpdate(
+    { _id: taskId, status: TASK_STATUS.QUEUED },
+    {
+      $set: { status: TASK_STATUS.RUNNING, leaseOwner: workerId, startedAt: new Date() },
+      $inc: { attempt: 1, leaseToken: 1 },
+    },
+    { returnDocument: "after" }
+  );
 }
