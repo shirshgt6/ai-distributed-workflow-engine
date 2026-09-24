@@ -5,8 +5,8 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phase 4 of 28 complete — foundation, auth/RBAC, workflow definitions, state machines, DAG validation.**
-> Workflows can be defined and edited, but not executed yet. See [docs/progress.md](docs/progress.md)
+> **Status: Phase 5 of 28 complete — workflows are defined, validated and EXECUTED (in-process executor).**
+> Redis queueing and separate worker processes are the next phases. See [docs/progress.md](docs/progress.md)
 > for exactly what is implemented, and [ARCHITECTURE.md](ARCHITECTURE.md)
 > for the target design.
 
@@ -25,6 +25,9 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
 - Explicit task/execution state machines with race-safe conditional transitions
 - DAG validation on every save (cycles named as a path, unknown/duplicate dependencies, duplicate keys)
   and `POST /workflows/validate` returning topological order + parallel levels
+- **Execution engine**: `POST /workflows/:id/run` runs the DAG with independent tasks in parallel, data flowing
+  from parents to children, transactional state changes, fail-fast failure handling, timeouts, and recovery of
+  stuck or orphaned tasks after a crash (in-process executor for now)
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)
 
@@ -61,6 +64,15 @@ curl localhost:4000/health  # {"status":"ok",...}
 curl localhost:4000/ready   # {"status":"ready","checks":{"mongo":...,"redis":...}}
 ```
 
+Run a workflow (with a token from `POST /auth/login` as an operator or admin):
+
+```bash
+curl -X POST localhost:4000/workflows -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Diamond","tasks":[{"key":"A","type":"noop"},{"key":"B","type":"delay","dependsOn":["A"],"config":{"ms":500}},{"key":"C","type":"delay","dependsOn":["A"],"config":{"ms":500}},{"key":"D","type":"echo","dependsOn":["B","C"]}]}'
+curl -X POST localhost:4000/workflows/<id>/run -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}'
+curl localhost:4000/executions/<executionId> -H "Authorization: Bearer $TOKEN"
+```
+
 Host ports are **27018** (Mongo) and **6380** (Redis) so this can run next to
 other local projects using the default ports.
 
@@ -87,11 +99,12 @@ src/
   auth/              passwords, tokens, permissions (RBAC table), ownership, request schemas
   models/            Mongoose models (User, Workflow, WorkflowExecution, Task, TaskExecution)
   repositories/      race-safe data operations (transitionTask)
-  workflow/          state machines, DAG validation (Kahn + DFS), workflow request schemas
+  workflow/          engine, in-process executor, state machines, DAG validation, request schemas
+  handlers/          built-in task handlers (noop, delay, fail, echo)
   middleware/        requestId, errorHandler, authenticate, authorize, validate
   controllers/       HTTP <-> service translation
-  routes/            health, auth, workflows
-  services/          health checks, auth, workflows
+  routes/            health, auth, workflows, executions
+  services/          health checks, auth, workflows, executions
   utils/             errors, withTimeout
 scripts/             create-admin
 tests/unit/          fast tests, fake dependencies

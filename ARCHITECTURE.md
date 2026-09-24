@@ -8,7 +8,7 @@ This document has two clearly separated parts:
 
 ---
 
-## 1. Implemented (Phases 1–4)
+## 1. Implemented (Phases 1–5)
 
 ```
             ┌────────────────────────────── API process (src/server.js) ─┐
@@ -22,6 +22,12 @@ This document has two clearly separated parts:
             │   → /workflows[/:id]                                        │
             │       authenticate → requirePermission → validate           │
             │       → workflowService (validateDag, ownerScope, version CAS)│
+            │   → /workflows/:id/run, /executions/:id → executionService  │
+            │       → ENGINE (transactions, CAS, pendingTasks counter)    │
+            │            ⇅ enqueue / start / complete / fail              │
+            │         IN-PROCESS EXECUTOR (concurrency limit, timeouts)   │
+            │            → handlers (noop, delay, fail, echo)             │
+            │   reconciler (interval) + orphan recovery (on boot)         │
             │   → notFound → errorHandler (uniform JSON errors)           │
             └───────────────┬─────────────────────────┬───────────────────┘
                             ▼                         ▼
@@ -56,8 +62,14 @@ This document has two clearly separated parts:
   checked against a transition table *and* applied with a conditional update
   (`{ status: from }`), so racing actors can't both win. See
   [docs/workflow-engine.md](docs/workflow-engine.md).
-- **Definitions vs executions.** Workflows are versioned definitions. Runs will
-  snapshot the version they execute (Phase 5). Data model details are in
+- **Definitions vs executions.** Workflows are versioned definitions. A run copies
+  each task's type and config into its own Task documents (the snapshot).
+- **No central orchestrator.** Whoever finishes a task runs the engine's
+  completion transaction, which releases the children. All state is in MongoDB,
+  so a crashed process loses nothing that recovery can't rebuild. Details, including
+  every race and its fix, are in [docs/workflow-engine.md](docs/workflow-engine.md).
+- **Temporary:** tasks execute inside the API process. Redis and worker processes
+  replace this in Phases 6–7 behind the same `enqueue` interface. Data model details are in
   [docs/database-design.md](docs/database-design.md).
 
 ## 2. Target design (not implemented yet)

@@ -115,3 +115,29 @@ Short ADRs: context → decision → consequences. New decisions are appended.
   and mirrors the runtime `remainingDeps` mechanism. DFS runs only on Kahn's leftovers to name one cycle.
 - **Consequences:** O(V + E) per write, trivial at <= 100 tasks. Error messages are actionable
   (`A -> B -> C -> A`). Only one cycle is named even if several exist; fixing it and re-validating reveals the next.
+
+## ADR-014: Completion is tracked with a counter on the execution, not by counting tasks
+
+- **Context:** Two final tasks finishing concurrently each ran "count unfinished tasks" in their own transaction
+  snapshot, and each saw the other still RUNNING. That's **write skew**: the execution stayed RUNNING forever.
+  This was reproduced by a mutation test.
+- **Decision:** `execution.pendingTasks` is decremented with `$inc` in every finishing transaction. Because all of
+  them write the same document, MongoDB detects the conflict and one transaction retries with fresh data.
+- **Consequences:** Correct under concurrency without locks. Completions within one execution serialise on that
+  document (acceptable at ≤ 100 tasks per run).
+
+## ADR-015: Fail-fast failure policy (until retries exist)
+
+- **Decision:** A failed task fails the execution immediately and cancels every task that hasn't started. Running
+  tasks may finish, but nothing new is promoted.
+- **Consequences:** Simple, predictable, and gives users an immediate signal. "Continue independent branches" could be
+  added later as a per-workflow option. Retries (Phase 8) will run before a task is declared FAILED.
+
+## ADR-016: In-process executor as a stepping stone
+
+- **Context:** The engine's logic (transactions, dependency resolution, races) should be understood and tested before
+  adding a network queue and separate processes.
+- **Decision:** The engine talks to executors only through `enqueue(item)` and the start/complete/fail functions. An
+  in-memory executor implements that for now.
+- **Consequences:** Queued work lives in memory, so a restart relies on `recoverInProcessOrphans` (single-process
+  only). Phase 6 swaps in Redis behind the same interface without changing engine logic.

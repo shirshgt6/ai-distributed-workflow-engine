@@ -21,6 +21,7 @@ Only implemented endpoints are listed. An OpenAPI/Swagger spec comes in Phase 27
 |---|---|
 | 200 | OK, with a body |
 | 201 | Resource created (register, workflow) + `Location` for workflows |
+| 202 | Accepted: a run was started (not finished); `Location: /executions/:id` |
 | 204 | Success with no body (logout) |
 | 400 | `VALIDATION_ERROR` (with `details[]`), `INVALID_WORKFLOW_GRAPH` (with graph `details[]`), or `INVALID_JSON` |
 | 401 | Not authenticated: `UNAUTHENTICATED`, `INVALID_CREDENTIALS`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `TOKEN_REVOKED` |
@@ -69,3 +70,12 @@ Limits: ≤ 100 tasks, ≤ 50 dependencies per task.
 Create and update validate the shape (zod) **and** the graph (cycles, unknown or duplicate dependencies, duplicate keys). An invalid graph returns 400 `INVALID_WORKFLOW_GRAPH`, with one entry per problem, e.g. `{ code: "CYCLE", cycle: ["A","B","C","A"], message }`.
 
 Pagination is offset-based (simple). Known trade-offs: deep pages get slower, and items can shift if data changes between pages. Cursor pagination is the upgrade.
+
+### Executions
+| Method | Path | Permission | Body | Success |
+|---|---|---|---|---|
+| POST | `/workflows/:id/run` | `workflow:run` | `{ input?: object }` | **202** `{ execution }` + `Location: /executions/:id`. 404 if the workflow is missing or not yours; 400 `INVALID_WORKFLOW_GRAPH` for a stored invalid graph |
+| GET | `/executions/:id` | `workflow:read` | — | 200 `{ execution, tasks[] }` (tasks: key, type, status, dependsOn, attempt, output, error, timestamps); 404 if not yours |
+
+A run is asynchronous. The client polls `GET /executions/:id` until `execution.status` is `COMPLETED` or `FAILED`.
+The execution belongs to the **workflow's owner** (so they can see it), and `triggeredBy` records who started it.

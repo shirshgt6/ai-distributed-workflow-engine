@@ -30,6 +30,13 @@ const envSchema = z.object({
   // bcrypt work factor: each +1 DOUBLES hashing time. 12 is a common
   // production baseline; tests lower it (min 4) purely for speed.
   BCRYPT_COST: z.coerce.number().int().min(4).max(15).default(12),
+
+  // In-process executor (Phase 5; replaced by Redis + worker processes later).
+  EXECUTOR_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(4),
+  // Reconciler: how often to look for READY tasks nobody dispatched, and how
+  // old "stuck" is. Freshly READY tasks are normal; only old ones are suspicious.
+  RECONCILE_INTERVAL_MS: z.coerce.number().int().min(100).default(5000),
+  RECONCILE_STALE_MS: z.coerce.number().int().min(100).default(10_000),
 }).refine((env) => env.JWT_ACCESS_SECRET !== env.JWT_REFRESH_SECRET, {
   // Same secret for both would let a refresh token pass access-token
   // verification (or vice versa) if the `type` claim check were ever missed.
@@ -85,5 +92,7 @@ export function loadConfig(source = process.env) {
       refreshTtl: env.JWT_REFRESH_TTL,
       bcryptCost: env.BCRYPT_COST,
     }),
+    executor: Object.freeze({ concurrency: env.EXECUTOR_CONCURRENCY }),
+    reconciler: Object.freeze({ intervalMs: env.RECONCILE_INTERVAL_MS, staleMs: env.RECONCILE_STALE_MS }),
   });
 }
