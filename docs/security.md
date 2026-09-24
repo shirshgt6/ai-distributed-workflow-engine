@@ -34,7 +34,7 @@ Roles: `admin`, `operator`, `viewer`. The single source of truth is `src/auth/pe
 - **Least privilege:** self-registered users are always `viewer`. The first admin is created out of band with `npm run create-admin`, which reads credentials from env vars and never from argv.
 - **Mass assignment:** request bodies are parsed with zod allowlist schemas, and controllers only read `req.valid`, so a `role` field in a register body is dropped.
 - An admin cannot change their own role, which prevents accidentally leaving the system with no admin.
-- **Object-level authorization (ownership, i.e. BOLA/IDOR protection) is not implemented yet.** It arrives with workflows in Phase 3. RBAC alone only answers "may this role do this kind of action?".
+- **Object-level authorization (BOLA/IDOR protection).** `ownerScope(user)` (`src/auth/ownership.js`) is merged into every workflow query. Non-admins only match their own documents, and admins match all. A foreign workflow returns **404, the same as a missing id**, so ids can't be probed. Updates use the same scope, so they can't touch a foreign workflow either. `ownerId` always comes from the JWT, never from the body.
 
 ## HTTP hardening (Phase 1)
 helmet headers, `x-powered-by` disabled, JSON body limit (100kb), uniform error responses that never expose internal error messages, and a validated `X-Request-Id`.
@@ -49,4 +49,4 @@ pino redacts `authorization` and `cookie` headers, and fields named `password`, 
 - **Registration reveals whether an email exists** (409 `EMAIL_TAKEN`). This is a usability trade-off, and rate limiting is the mitigation.
 
 ## Planned (not implemented)
-Login and registration rate limiting (Redis, Phase 24), prompt-injection defences and agent tool restrictions (Phases 20 and 24), ownership checks (Phase 3).
+Login and registration rate limiting (Redis, Phase 24), prompt-injection defences and agent tool restrictions (Phases 20 and 24).

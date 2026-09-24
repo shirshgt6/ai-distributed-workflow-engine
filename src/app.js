@@ -6,6 +6,7 @@ import { errorHandler, notFound } from "./middleware/errorHandler.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { createAuthRouter } from "./routes/auth.routes.js";
 import { createAuthenticate } from "./middleware/authenticate.js";
+import { createWorkflowRouter } from "./routes/workflow.routes.js";
 
 /**
  * Build the Express app WITHOUT starting a server or connecting to anything.
@@ -20,12 +21,21 @@ import { createAuthenticate } from "./middleware/authenticate.js";
  *   checks?: Record<string, () => Promise<void>>,
  *   isShuttingDown?: () => boolean,
  *   bodyLimit?: string,
- *   auth?: { authService: object, tokens: object }
+ *   auth?: { authService: object, tokens: object },
+ *   workflowService?: object
  * }} deps
- *   auth is optional so tests that only exercise health/errors don't need
- *   to build the whole auth stack.
+ *   auth / workflowService are optional so tests that only exercise
+ *   health/errors don't need to build the whole stack. Workflow routes need
+ *   auth (every workflow route is authenticated).
  */
-export function createApp({ logger, checks = {}, isShuttingDown = () => false, bodyLimit = "100kb", auth }) {
+export function createApp({
+  logger,
+  checks = {},
+  isShuttingDown = () => false,
+  bodyLimit = "100kb",
+  auth,
+  workflowService,
+}) {
   const app = express();
 
   // Don't advertise the framework (X-Powered-By: Express) to scanners.
@@ -67,6 +77,9 @@ export function createApp({ logger, checks = {}, isShuttingDown = () => false, b
   if (auth) {
     const authenticate = createAuthenticate(auth.tokens);
     app.use(createAuthRouter({ authService: auth.authService, authenticate }));
+    if (workflowService) {
+      app.use(createWorkflowRouter({ workflowService, authenticate }));
+    }
   }
 
   // 6. Nothing matched -> 404, then the error handler LAST.

@@ -12,20 +12,21 @@ Only implemented endpoints are listed. An OpenAPI/Swagger spec comes in Phase 27
   Clients should branch on `code`, never on `message`.
 - `X-Request-Id` is echoed back, or generated if missing.
 - Protected endpoints take `Authorization: Bearer <accessToken>`.
-- Checks run in this order: **authenticate (401) → authorize (403) → validate (400) → handler**.
+- Checks run in this order: **authenticate (401) → authorize (403) → validate (400) → handler**. Ownership is checked in the service, and a foreign resource returns **404**.
+- **Ownership:** non-admins only ever see their own resources. Someone else's resource returns **404, not 403**, so its existence isn't revealed. Admins see all.
 
 ### Status codes used
 
 | Code | Meaning here |
 |---|---|
 | 200 | OK, with a body |
-| 201 | Resource created (register) |
+| 201 | Resource created (register, workflow) + `Location` for workflows |
 | 204 | Success with no body (logout) |
 | 400 | `VALIDATION_ERROR` (with `details[]`) or `INVALID_JSON` |
 | 401 | Not authenticated: `UNAUTHENTICATED`, `INVALID_CREDENTIALS`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `TOKEN_REVOKED` |
 | 403 | Authenticated but not allowed: `FORBIDDEN`, `SELF_ROLE_CHANGE` |
 | 404 | `NOT_FOUND` |
-| 409 | `EMAIL_TAKEN` |
+| 409 | `EMAIL_TAKEN`, `VERSION_CONFLICT` |
 | 413 | `PAYLOAD_TOO_LARGE` |
 | 500 | `INTERNAL_ERROR` (details only in logs) |
 | 503 | Not ready (`/ready`) |
@@ -53,3 +54,17 @@ Only implemented endpoints are listed. An OpenAPI/Swagger spec comes in Phase 27
 | PATCH | `/users/:id/role` | Bearer | `user:manage` | `{ role }` | 200 `{ user }`; the target's refresh tokens are revoked |
 
 `user` objects never include `passwordHash` or `tokenVersion`.
+
+### Workflows (definitions)
+| Method | Path | Permission | Body / query | Success |
+|---|---|---|---|---|
+| POST | `/workflows` | `workflow:create` | `{ name, description?, tasks[] }` | 201 `{ workflow }` + `Location` header, `version: 1` |
+| GET | `/workflows` | `workflow:read` | `?limit=1..100 (20)&page=1..` | 200 `{ items, page, limit, total }` (own only; admin: all) |
+| GET | `/workflows/:id` | `workflow:read` | — | 200 `{ workflow }`; 404 if missing **or not yours** |
+| PUT | `/workflows/:id` | `workflow:create` | `{ name, description?, tasks[], version }` | 200, `version` + 1; **409 `VERSION_CONFLICT`** if `version` is stale |
+
+Task definition: `{ key, type, name?, dependsOn[], config{}, retryPolicy{maxAttempts 1-10, baseDelayMs}, timeoutMs 100ms-1h }`.
+Limits: ≤ 100 tasks, ≤ 50 dependencies per task.
+**Only the shape is validated for now.** Unknown dependencies, duplicate keys and cycles are accepted until Phase 4 adds graph validation.
+
+Pagination is offset-based (simple). Known trade-offs: deep pages get slower, and items can shift if data changes between pages. Cursor pagination is the upgrade.

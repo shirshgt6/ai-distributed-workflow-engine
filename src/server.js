@@ -7,6 +7,8 @@ import { createApp } from "./app.js";
 import { createTokenService } from "./auth/tokens.js";
 import { createAuthService } from "./services/auth.service.js";
 import { User } from "./models/user.model.js";
+import { Workflow } from "./models/workflow.model.js";
+import { createWorkflowService } from "./services/workflow.service.js";
 
 // Composition root: the ONE place that reads config, creates real
 // connections and wires them into the app. Everything else receives its
@@ -26,6 +28,7 @@ async function main() {
 
   const tokens = createTokenService(config.auth);
   const authService = createAuthService({ User, tokens, bcryptCost: config.auth.bcryptCost });
+  const workflowService = createWorkflowService({ Workflow });
 
   let shuttingDown = false;
 
@@ -38,6 +41,7 @@ async function main() {
     },
     isShuttingDown: () => shuttingDown,
     auth: { authService, tokens },
+    workflowService,
   });
 
   const server = app.listen(config.port, () => {

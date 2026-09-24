@@ -80,3 +80,29 @@ Short ADRs: context → decision → consequences. New decisions are appended.
   is enforced in the service layer when resources are loaded.
 - **Consequences:** Changing a role's powers is a one-file change with a test matrix guarding it.
   RBAC alone does not prevent BOLA/IDOR — ownership filters are required on every resource query.
+
+## ADR-010: Tasks are separate documents, not an array inside the execution
+
+- **Context:** Sibling tasks complete concurrently on different workers; recovery must find
+  RUNNING tasks with expired leases across all executions.
+- **Decision:** One `Task` document per task instance, keyed `{executionId, key}` (unique).
+- **Consequences:** No write contention on one hot document; direct indexed queries for the
+  sweeper; no 16MB-document risk. Changes spanning several tasks (complete + notify dependents)
+  need a multi-document transaction.
+
+## ADR-011: Execution snapshots + optimistic concurrency for workflow definitions
+
+- **Context:** A definition can be edited while runs of it are in progress; two people can edit it
+  at the same time.
+- **Decision:** Executions record `workflowVersion` and (Phase 5) copy the task definitions they
+  run. Edits are conditional on the client-supplied `version` and bump it atomically.
+- **Consequences:** Edits never affect running executions; concurrent edits cannot silently overwrite
+  each other (loser gets 409 and must reload). No locks are held while users edit. Old versions are
+  not stored separately — the execution snapshot is the record of what ran.
+
+## ADR-012: Ownership enforced in the query; foreign resources return 404
+
+- **Decision:** `ownerScope(user)` is merged into the Mongo filter of every owned-resource query
+  instead of loading the document and checking afterwards.
+- **Consequences:** No code path can forget the check after loading; foreign and non-existent
+  resources are indistinguishable (no id probing). Admin bypass is explicit in one function.
