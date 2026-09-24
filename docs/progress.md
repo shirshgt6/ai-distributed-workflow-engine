@@ -6,7 +6,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 |---|---|---|
 | 1 | Project architecture + configuration | ✅ |
 | 2 | Authentication + RBAC | ✅ |
-| 3 | Workflow and task domain models | ⬜ |
+| 3 | Workflow and task domain models | ✅ |
 | 4 | DAG validation | ⬜ |
 | 5 | Workflow execution engine | ⬜ |
 | 6 | Redis task scheduling | ⬜ |
@@ -80,3 +80,30 @@ timing leak. Fixed by computing it eagerly at startup; re-measured: both paths ~
 
 **Not done / deferred**: ownership checks (Phase 3), login rate limiting (Phase 24), refresh-token
 rotation with reuse detection (documented as a production improvement in docs/security.md).
+
+## Phase 3 — Workflow and task domain models ✅
+
+**Implemented**
+- Explicit state machines for executions and tasks (`src/workflow/states.js`): transition tables,
+  terminal states, `assertTransition` / `InvalidTransitionError`
+- `transitionTask(id, from, to, {set, inc, where, session})` — compare-and-set on status, supports
+  fencing via `where: { leaseOwner, leaseToken }` (`src/repositories/task.repository.js`)
+- Models: `Workflow` (embedded task definitions, `version`), `WorkflowExecution` (version snapshot),
+  `Task` (one doc per task: dependency counters, lease + fencing token), `TaskExecution` (one doc per attempt)
+- Workflow CRUD API: create / list (paginated) / get / update
+- Ownership (`ownerScope`) on every workflow query — foreign workflow = 404
+- Optimistic concurrency on workflow edits (`version` in filter + `$inc`) — stale edit = 409
+- Shape validation for workflow definitions (limits on tasks, dependencies, retries, timeouts)
+
+**Tests**: 124 total. New: state-machine matrix, schema limits, workflow CRUD + RBAC + ownership,
+5 concurrent edits -> exactly one wins, 10 concurrent task completions -> exactly one wins,
+complete-vs-cancel race, stale fencing token rejected, unique indexes.
+
+**Mutation check**: removed the ownership scope, the version condition, the status condition, and
+made COMPLETED non-terminal — each was caught by failing tests, then reverted.
+
+**Smoke-tested** on the real server: operator creates (201 + Location), another operator gets 404,
+stale edit gets 409 with `currentVersion`, list is scoped, request logs carry `userId`.
+
+**Not done / deferred**: graph validation (Phase 4). Executions and tasks are modelled but not yet
+created by any endpoint (Phase 5).

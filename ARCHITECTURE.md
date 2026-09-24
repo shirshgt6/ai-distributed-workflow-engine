@@ -8,7 +8,7 @@ This document has two clearly separated parts:
 
 ---
 
-## 1. Implemented (Phases 1–2)
+## 1. Implemented (Phases 1–3)
 
 ```
             ┌────────────────────────────── API process (src/server.js) ─┐
@@ -19,6 +19,9 @@ This document has two clearly separated parts:
             │   → /auth/*, /users/:id/role                                │
             │       authenticate(JWT) → requirePermission(RBAC)           │
             │       → validate(zod) → controller → authService            │
+            │   → /workflows[/:id]                                        │
+            │       authenticate → requirePermission → validate           │
+            │       → workflowService (ownerScope filter, version CAS)    │
             │   → notFound → errorHandler (uniform JSON errors)           │
             └───────────────┬─────────────────────────┬───────────────────┘
                             ▼                         ▼
@@ -48,7 +51,14 @@ This document has two clearly separated parts:
   `user.tokenVersion`. Details and trade-offs are in [docs/security.md](docs/security.md).
 - **Authorization is split in two.** RBAC (the permission table) answers "may this
   role do this action?". Ownership checks answer "is this object yours?" and
-  are added with the first owned resource (workflows, Phase 3).
+  live in the query itself (`ownerScope`), so a foreign resource is a 404.
+- **Explicit state machines + compare-and-set.** Every task status change is
+  checked against a transition table *and* applied with a conditional update
+  (`{ status: from }`), so racing actors can't both win. See
+  [docs/workflow-engine.md](docs/workflow-engine.md).
+- **Definitions vs executions.** Workflows are versioned definitions. Runs will
+  snapshot the version they execute (Phase 5). Data model details are in
+  [docs/database-design.md](docs/database-design.md).
 
 ## 2. Target design (not implemented yet)
 
