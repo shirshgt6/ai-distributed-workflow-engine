@@ -165,3 +165,69 @@ describe("PUT /workflows/:id — optimistic concurrency", () => {
     expect(stored.name).toBe(winners[0].body.workflow.name); // the winner's edit is what's stored
   });
 });
+
+describe("graph validation on save (Phase 4)", () => {
+  const cyclic = {
+    name: "Cyclic",
+    tasks: [
+      { key: "A", type: "noop", dependsOn: ["C"] },
+      { key: "B", type: "noop", dependsOn: ["A"] },
+      { key: "C", type: "noop", dependsOn: ["B"] },
+    ],
+  };
+
+  test("POST with a cycle -> 400 INVALID_WORKFLOW_GRAPH naming the cycle, nothing stored", async () => {
+    const before = await Workflow.countDocuments({});
+    const res = await as(app, alice.token).post("/workflows").send(cyclic);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("INVALID_WORKFLOW_GRAPH");
+    expect(res.body.error.details).toEqual([
+      expect.objectContaining({ code: "CYCLE", cycle: ["A", "B", "C", "A"] }),
+    ]);
+    expect(await Workflow.countDocuments({})).toBe(before);
+  });
+
+  test("POST with an unknown dependency -> 400", async () => {
+    const res = await as(app, alice.token)
+      .post("/workflows")
+      .send({ name: "x", tasks: [{ key: "A", type: "noop", dependsOn: ["ghost"] }] });
+    expect(res.status).toBe(400);
+    expect(res.body.error.details[0]).toMatchObject({ code: "UNKNOWN_DEPENDENCY", dependency: "ghost" });
+  });
+
+  test("PUT that would introduce a cycle -> 400 and the stored workflow is untouched", async () => {
+    const wf = (await as(app, alice.token).post("/workflows").send(diamond)).body.workflow;
+    const res = await as(app, alice.token)
+      .put(`/workflows/${wf.id}`)
+      .send({ ...cyclic, version: 1 });
+    expect(res.status).toBe(400);
+    const stored = await Workflow.findById(wf.id);
+    expect(stored.version).toBe(1);
+    expect(stored.name).toBe("Diamond");
+  });
+
+  test("POST /workflows/validate: dry run with order and parallel levels, nothing stored", async () => {
+    const before = await Workflow.countDocuments({});
+    const res = await as(app, alice.token).post("/workflows/validate").send(diamond);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      valid: true,
+      errors: [],
+      order: ["A", "B", "C", "D"],
+      levels: [["A"], ["B", "C"], ["D"]],
+      criticalPathLength: 3,
+    });
+    expect(await Workflow.countDocuments({})).toBe(before);
+  });
+
+  test("POST /workflows/validate on an invalid graph -> 200 with valid:false", async () => {
+    const res = await as(app, alice.token).post("/workflows/validate").send(cyclic);
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(false);
+    expect(res.body.errors[0].code).toBe("CYCLE");
+  });
+
+  test("viewer cannot use the validate endpoint (it is part of authoring)", async () => {
+    expect((await as(app, victor.token).post("/workflows/validate").send(diamond)).status).toBe(403);
+  });
+});

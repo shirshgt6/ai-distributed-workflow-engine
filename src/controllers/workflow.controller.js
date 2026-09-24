@@ -9,6 +9,19 @@ export function createWorkflowController(workflowService) {
       res.status(201).location(`/workflows/${workflow._id}`).json({ workflow });
     },
 
+    // 200 whether or not the graph is valid: the request itself succeeded,
+    // the ANSWER is "valid: false". (A save of the same body returns 400.)
+    validate(req, res) {
+      const result = workflowService.analyse(req.valid.body);
+      res.status(200).json({
+        valid: result.valid,
+        errors: result.errors,
+        order: result.order,
+        levels: result.levels,
+        criticalPathLength: result.levels.length,
+      });
+    },
+
     async list(req, res) {
       const result = await workflowService.list(req.user, req.valid.query);
       res.status(200).json(result);

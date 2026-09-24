@@ -22,7 +22,7 @@ Only implemented endpoints are listed. An OpenAPI/Swagger spec comes in Phase 27
 | 200 | OK, with a body |
 | 201 | Resource created (register, workflow) + `Location` for workflows |
 | 204 | Success with no body (logout) |
-| 400 | `VALIDATION_ERROR` (with `details[]`) or `INVALID_JSON` |
+| 400 | `VALIDATION_ERROR` (with `details[]`), `INVALID_WORKFLOW_GRAPH` (with graph `details[]`), or `INVALID_JSON` |
 | 401 | Not authenticated: `UNAUTHENTICATED`, `INVALID_CREDENTIALS`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `TOKEN_REVOKED` |
 | 403 | Authenticated but not allowed: `FORBIDDEN`, `SELF_ROLE_CHANGE` |
 | 404 | `NOT_FOUND` |
@@ -59,12 +59,13 @@ Only implemented endpoints are listed. An OpenAPI/Swagger spec comes in Phase 27
 | Method | Path | Permission | Body / query | Success |
 |---|---|---|---|---|
 | POST | `/workflows` | `workflow:create` | `{ name, description?, tasks[] }` | 201 `{ workflow }` + `Location` header, `version: 1` |
+| POST | `/workflows/validate` | `workflow:create` | same body as create | 200 `{ valid, errors[], order[], levels[][], criticalPathLength }`, nothing saved (200 even when `valid:false`) |
 | GET | `/workflows` | `workflow:read` | `?limit=1..100 (20)&page=1..` | 200 `{ items, page, limit, total }` (own only; admin: all) |
 | GET | `/workflows/:id` | `workflow:read` | — | 200 `{ workflow }`; 404 if missing **or not yours** |
 | PUT | `/workflows/:id` | `workflow:create` | `{ name, description?, tasks[], version }` | 200, `version` + 1; **409 `VERSION_CONFLICT`** if `version` is stale |
 
 Task definition: `{ key, type, name?, dependsOn[], config{}, retryPolicy{maxAttempts 1-10, baseDelayMs}, timeoutMs 100ms-1h }`.
 Limits: ≤ 100 tasks, ≤ 50 dependencies per task.
-**Only the shape is validated for now.** Unknown dependencies, duplicate keys and cycles are accepted until Phase 4 adds graph validation.
+Create and update validate the shape (zod) **and** the graph (cycles, unknown or duplicate dependencies, duplicate keys). An invalid graph returns 400 `INVALID_WORKFLOW_GRAPH`, with one entry per problem, e.g. `{ code: "CYCLE", cycle: ["A","B","C","A"], message }`.
 
 Pagination is offset-based (simple). Known trade-offs: deep pages get slower, and items can shift if data changes between pages. Cursor pagination is the upgrade.

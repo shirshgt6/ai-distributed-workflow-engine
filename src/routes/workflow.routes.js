@@ -19,6 +19,12 @@ export function createWorkflowRouter({ workflowService, authenticate }) {
   router.use("/workflows", authenticate);
 
   router.post("/workflows", requirePermission(PERMISSIONS.WORKFLOW_CREATE), validate(createWorkflowSchema), c.create);
+  router.post(
+    "/workflows/validate",
+    requirePermission(PERMISSIONS.WORKFLOW_CREATE),
+    validate(createWorkflowSchema),
+    c.validate
+  );
   router.get("/workflows", requirePermission(PERMISSIONS.WORKFLOW_READ), validate(listWorkflowsSchema), c.list);
   router.get("/workflows/:id", requirePermission(PERMISSIONS.WORKFLOW_READ), validate(workflowIdSchema), c.get);
   // Editing a definition is the same capability as creating one.

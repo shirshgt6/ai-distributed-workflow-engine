@@ -1,5 +1,21 @@
 import { ownerScope } from "../auth/ownership.js";
-import { ConflictError, NotFoundError } from "../utils/errors.js";
+import { ConflictError, NotFoundError, ValidationError } from "../utils/errors.js";
+import { validateDag } from "../workflow/dag.js";
+
+/**
+ * Reject a definition whose task graph is not a valid DAG (cycle, unknown
+ * or duplicate dependency, duplicate key). Runs on EVERY write path, so an
+ * invalid graph can never be stored — and so never executed.
+ */
+function assertValidGraph(tasks) {
+  const result = validateDag(tasks);
+  if (!result.valid) {
+    throw new ValidationError("Workflow task graph is invalid", {
+      code: "INVALID_WORKFLOW_GRAPH",
+      details: result.errors,
+    });
+  }
+}
 
 /**
  * Workflow DEFINITIONS (the "recipes"). Running them is Phase 5.
@@ -16,8 +32,18 @@ export function createWorkflowService({ Workflow }) {
 
   return {
     async create(user, { name, description, tasks }) {
+      assertValidGraph(tasks);
       // ownerId comes from the authenticated user, never from the body.
       return Workflow.create({ ownerId: user.id, name, description, tasks });
+    },
+
+    /**
+     * Dry run: analyse a definition without saving it. Returns the same
+     * errors a save would, plus — when valid — the execution order and the
+     * parallel levels ("waves"), which is useful for a UI preview.
+     */
+    analyse({ tasks }) {
+      return validateDag(tasks);
     },
 
     async list(user, { limit, page }) {
@@ -51,6 +77,7 @@ export function createWorkflowService({ Workflow }) {
      * conflicts are detected at save time instead.
      */
     async update(user, id, { version, name, description, tasks }) {
+      assertValidGraph(tasks);
       const updated = await Workflow.findOneAndUpdate(
         { _id: id, ...ownerScope(user), version },
         { $set: { name, description, tasks }, $inc: { version: 1 } },

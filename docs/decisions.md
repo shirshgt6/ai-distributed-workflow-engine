@@ -106,3 +106,12 @@ Short ADRs: context → decision → consequences. New decisions are appended.
   instead of loading the document and checking afterwards.
 - **Consequences:** No code path can forget the check after loading; foreign and non-existent
   resources are indistinguishable (no id probing). Admin bypass is explicit in one function.
+
+## ADR-013: Validate the DAG on every write; Kahn for order, DFS for reporting
+
+- **Context:** An invalid graph stored once would fail (or hang) every execution of it.
+- **Decision:** Validate on create and update in the service layer (not in the zod schema: graph rules need
+  the whole task list). Kahn's algorithm is the primary check — iterative, yields order and parallel levels,
+  and mirrors the runtime `remainingDeps` mechanism. DFS runs only on Kahn's leftovers to name one cycle.
+- **Consequences:** O(V + E) per write, trivial at <= 100 tasks. Error messages are actionable
+  (`A -> B -> C -> A`). Only one cycle is named even if several exist; fixing it and re-validating reveals the next.
