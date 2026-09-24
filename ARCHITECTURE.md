@@ -8,7 +8,7 @@ This document has two clearly separated parts:
 
 ---
 
-## 1. Implemented (Phases 1–3)
+## 1. Implemented (Phases 1–4)
 
 ```
             ┌────────────────────────────── API process (src/server.js) ─┐
@@ -21,7 +21,7 @@ This document has two clearly separated parts:
             │       → validate(zod) → controller → authService            │
             │   → /workflows[/:id]                                        │
             │       authenticate → requirePermission → validate           │
-            │       → workflowService (ownerScope filter, version CAS)    │
+            │       → workflowService (validateDag, ownerScope, version CAS)│
             │   → notFound → errorHandler (uniform JSON errors)           │
             └───────────────┬─────────────────────────┬───────────────────┘
                             ▼                         ▼

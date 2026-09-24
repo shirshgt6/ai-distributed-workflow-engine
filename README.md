@@ -5,7 +5,7 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phase 3 of 28 complete — foundation, auth/RBAC, workflow definitions + state machines.**
+> **Status: Phase 4 of 28 complete — foundation, auth/RBAC, workflow definitions, state machines, DAG validation.**
 > Workflows can be defined and edited, but not executed yet. See [docs/progress.md](docs/progress.md)
 > for exactly what is implemented, and [ARCHITECTURE.md](ARCHITECTURE.md)
 > for the target design.
@@ -23,6 +23,8 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
 - Workflow definitions API (create / list / get / update) with per-user ownership (404 for foreign)
   and optimistic concurrency on edits (409 on stale version)
 - Explicit task/execution state machines with race-safe conditional transitions
+- DAG validation on every save (cycles named as a path, unknown/duplicate dependencies, duplicate keys)
+  and `POST /workflows/validate` returning topological order + parallel levels
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)
 
@@ -85,7 +87,7 @@ src/
   auth/              passwords, tokens, permissions (RBAC table), ownership, request schemas
   models/            Mongoose models (User, Workflow, WorkflowExecution, Task, TaskExecution)
   repositories/      race-safe data operations (transitionTask)
-  workflow/          state machines, workflow request schemas
+  workflow/          state machines, DAG validation (Kahn + DFS), workflow request schemas
   middleware/        requestId, errorHandler, authenticate, authorize, validate
   controllers/       HTTP <-> service translation
   routes/            health, auth, workflows

@@ -7,7 +7,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 1 | Project architecture + configuration | ✅ |
 | 2 | Authentication + RBAC | ✅ |
 | 3 | Workflow and task domain models | ✅ |
-| 4 | DAG validation | ⬜ |
+| 4 | DAG validation | ✅ |
 | 5 | Workflow execution engine | ⬜ |
 | 6 | Redis task scheduling | ⬜ |
 | 7 | Distributed workers | ⬜ |
@@ -105,5 +105,23 @@ made COMPLETED non-terminal — each was caught by failing tests, then reverted.
 **Smoke-tested** on the real server: operator creates (201 + Location), another operator gets 404,
 stale edit gets 409 with `currentVersion`, list is scoped, request logs carry `userId`.
 
-**Not done / deferred**: graph validation (Phase 4). Executions and tasks are modelled but not yet
-created by any endpoint (Phase 5).
+**Not done / deferred**: executions and tasks are modelled but not yet created by any endpoint (Phase 5).
+
+## Phase 4 — DAG validation ✅
+
+**Implemented**
+- `src/workflow/dag.js`: `validateDag`, `kahn` (topological order + parallel levels), `findCycle` (3-colour DFS)
+- Rejects duplicate keys, self-dependency, unknown dependency, duplicate dependency entries, cycles —
+  all errors reported at once; cycles reported as a path in execution direction
+- Enforced on every workflow create AND update (400 `INVALID_WORKFLOW_GRAPH`, nothing stored)
+- `POST /workflows/validate` dry run returning order, levels and critical path length (in tasks)
+
+**Tests**: 150 total. New: 26 (diamond, chains, disconnected graphs, input-order independence, topological
+property check, 100-task chain, 2- and 3-node cycles, cycle behind a valid prefix, each structural error,
+all-errors-at-once, integration for create/update/validate).
+
+**Mutation check**: disabled cycle detection; removed the duplicate-dependency check; removed validation from
+the update path — each caught by failing tests, then reverted.
+
+**Smoke-tested**: the brief's document pipeline validates with `classify` and `retrieve` in the same parallel
+level; a body with three different graph errors returns all three messages.
