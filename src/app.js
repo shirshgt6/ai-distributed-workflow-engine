@@ -4,6 +4,8 @@ import { pinoHttp } from "pino-http";
 import { requestId } from "./middleware/requestId.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 import { healthRouter } from "./routes/health.routes.js";
+import { createAuthRouter } from "./routes/auth.routes.js";
+import { createAuthenticate } from "./middleware/authenticate.js";
 
 /**
  * Build the Express app WITHOUT starting a server or connecting to anything.
@@ -17,10 +19,13 @@ import { healthRouter } from "./routes/health.routes.js";
  *   logger: import('pino').Logger,
  *   checks?: Record<string, () => Promise<void>>,
  *   isShuttingDown?: () => boolean,
- *   bodyLimit?: string
+ *   bodyLimit?: string,
+ *   auth?: { authService: object, tokens: object }
  * }} deps
+ *   auth is optional so tests that only exercise health/errors don't need
+ *   to build the whole auth stack.
  */
-export function createApp({ logger, checks = {}, isShuttingDown = () => false, bodyLimit = "100kb" }) {
+export function createApp({ logger, checks = {}, isShuttingDown = () => false, bodyLimit = "100kb", auth }) {
   const app = express();
 
   // Don't advertise the framework (X-Powered-By: Express) to scanners.
@@ -39,6 +44,9 @@ export function createApp({ logger, checks = {}, isShuttingDown = () => false, b
       // Load balancers hit /health every few seconds; logging each hit
       // would drown real traffic in noise.
       autoLogging: { ignore: (req) => req.url === "/health" },
+      // Evaluated when the request completes, i.e. after authenticate ran:
+      // every request log line then says WHO made the request.
+      customProps: (req) => (req.user ? { userId: req.user.id } : {}),
       customLogLevel: (req, res, err) => {
         if (err || res.statusCode >= 500) return "error";
         if (res.statusCode >= 400) return "warn";
@@ -56,6 +64,10 @@ export function createApp({ logger, checks = {}, isShuttingDown = () => false, b
 
   // 5. Routes.
   app.use(healthRouter({ checks, isShuttingDown, logger }));
+  if (auth) {
+    const authenticate = createAuthenticate(auth.tokens);
+    app.use(createAuthRouter({ authService: auth.authService, authenticate }));
+  }
 
   // 6. Nothing matched -> 404, then the error handler LAST.
   app.use(notFound);

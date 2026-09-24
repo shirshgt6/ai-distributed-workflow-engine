@@ -8,7 +8,7 @@ This document has two clearly separated parts:
 
 ---
 
-## 1. Implemented (Phase 1)
+## 1. Implemented (Phases 1–2)
 
 ```
             ┌────────────────────────────── API process (src/server.js) ─┐
@@ -16,6 +16,9 @@ This document has two clearly separated parts:
             │   → /health (liveness, no deps)                             │
             │   → /ready  (readiness) ──► runHealthChecks (parallel,      │
             │                              per-check timeout)             │
+            │   → /auth/*, /users/:id/role                                │
+            │       authenticate(JWT) → requirePermission(RBAC)           │
+            │       → validate(zod) → controller → authService            │
             │   → notFound → errorHandler (uniform JSON errors)           │
             └───────────────┬─────────────────────────┬───────────────────┘
                             ▼                         ▼
@@ -40,6 +43,12 @@ This document has two clearly separated parts:
   transactions are available when the outbox pattern arrives.
 - **Redis `noeviction`** so a full Redis rejects writes rather than silently
   deleting queue data.
+- **Auth is stateless on the hot path.** Access JWTs are verified by signature
+  only (no DB hit per request). Revocation happens at refresh time through
+  `user.tokenVersion`. Details and trade-offs are in [docs/security.md](docs/security.md).
+- **Authorization is split in two.** RBAC (the permission table) answers "may this
+  role do this action?". Ownership checks answer "is this object yours?" and
+  are added with the first owned resource (workflows, Phase 3).
 
 ## 2. Target design (not implemented yet)
 

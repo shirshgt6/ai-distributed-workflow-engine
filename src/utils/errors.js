@@ -20,8 +20,36 @@ export class AppError extends Error {
   }
 }
 
+/** 400 — request is malformed / fails validation. */
+export class ValidationError extends AppError {
+  constructor(message = "Request validation failed", options = {}) {
+    super(message, { statusCode: 400, code: "VALIDATION_ERROR", ...options });
+  }
+}
+
+/** 401 — we don't know who you are (missing/invalid/expired credentials). */
+export class UnauthorizedError extends AppError {
+  constructor(message = "Authentication required", options = {}) {
+    super(message, { statusCode: 401, code: "UNAUTHENTICATED", ...options });
+  }
+}
+
+/** 403 — we know who you are, and you're not allowed to do this. */
+export class ForbiddenError extends AppError {
+  constructor(message = "You do not have permission to perform this action", options = {}) {
+    super(message, { statusCode: 403, code: "FORBIDDEN", ...options });
+  }
+}
+
 export class NotFoundError extends AppError {
   constructor(message = "Resource not found", options = {}) {
     super(message, { statusCode: 404, code: "NOT_FOUND", ...options });
+  }
+}
+
+/** 409 — request conflicts with current state (duplicate, wrong state...). */
+export class ConflictError extends AppError {
+  constructor(message = "Conflict", options = {}) {
+    super(message, { statusCode: 409, code: "CONFLICT", ...options });
   }
 }

@@ -4,6 +4,9 @@ import { createLogger } from "./config/logger.js";
 import { connectMongo, disconnectMongo, pingMongo } from "./config/mongo.js";
 import { createRedisClient, pingRedis } from "./config/redis.js";
 import { createApp } from "./app.js";
+import { createTokenService } from "./auth/tokens.js";
+import { createAuthService } from "./services/auth.service.js";
+import { User } from "./models/user.model.js";
 
 // Composition root: the ONE place that reads config, creates real
 // connections and wires them into the app. Everything else receives its
@@ -21,6 +24,9 @@ async function main() {
   const redis = createRedisClient(config.redis.url, logger);
   await redis.connect();
 
+  const tokens = createTokenService(config.auth);
+  const authService = createAuthService({ User, tokens, bcryptCost: config.auth.bcryptCost });
+
   let shuttingDown = false;
 
   const app = createApp({
@@ -31,6 +37,7 @@ async function main() {
       redis: () => pingRedis(redis),
     },
     isShuttingDown: () => shuttingDown,
+    auth: { authService, tokens },
   });
 
   const server = app.listen(config.port, () => {
