@@ -52,3 +52,31 @@ Short ADRs: context → decision → consequences. New decisions are appended.
 - **Consequences:** Free and offline; smaller local models are weaker at
   structured output, which makes validation/repair logic genuinely necessary.
   Azure OpenAI is not supported and must not be claimed.
+
+## ADR-007: Stateless JWT access tokens + DB-checked refresh tokens
+
+- **Context:** Every API request must be authenticated; a DB lookup per request adds latency
+  and load, but purely stateless tokens cannot be revoked.
+- **Decision:** Short-lived access tokens (15m) verified by signature only; long-lived refresh
+  tokens (7d) checked against `user.tokenVersion` in MongoDB on every refresh.
+- **Consequences:** No DB hit on normal requests. Revocation (logout, role change) takes effect
+  for refresh immediately, but an already-issued access token remains valid up to 15 minutes.
+  `tokenVersion` is per user, so logout signs out all devices. Rotation with reuse detection
+  is a documented future improvement.
+
+## ADR-008: bcryptjs instead of native bcrypt
+
+- **Context:** The native `bcrypt` package needs an install script (native build); this
+  environment blocks npm install scripts by default.
+- **Decision:** `bcryptjs` (pure JS, same algorithm and hash format).
+- **Consequences:** No native toolchain needed, identical `$2b$` hashes (switchable later).
+  Somewhat slower per hash than native and runs on the main thread — a hash blocks the event
+  loop for its duration. At high login volume, move hashing to worker threads or native bcrypt.
+
+## ADR-009: RBAC as a permission table; ownership checks are separate
+
+- **Decision:** Code checks permissions (`requirePermission("workflow:run")`), never role names.
+  One table maps roles to permissions. Object-level authorization (is this resource yours?)
+  is enforced in the service layer when resources are loaded.
+- **Consequences:** Changing a role's powers is a one-file change with a test matrix guarding it.
+  RBAC alone does not prevent BOLA/IDOR — ownership filters are required on every resource query.

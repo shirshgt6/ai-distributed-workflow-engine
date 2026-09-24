@@ -5,7 +5,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | # | Phase | Status |
 |---|---|---|
 | 1 | Project architecture + configuration | ✅ |
-| 2 | Authentication + RBAC | ⬜ |
+| 2 | Authentication + RBAC | ✅ |
 | 3 | Workflow and task domain models | ⬜ |
 | 4 | DAG validation | ⬜ |
 | 5 | Workflow execution engine | ⬜ |
@@ -51,3 +51,32 @@ Redis restarted → recovers to 200, SIGTERM → clean shutdown, invalid config 
 
 **Bug found during smoke test**: ioredis connection errors are `AggregateError`s with an empty `message`,
 so outage logs showed `err: ""`. Fixed by also logging `err.code` (`ECONNREFUSED`).
+
+## Phase 2 — Authentication + RBAC ✅
+
+**Implemented**
+- `User` model (unique email, `passwordHash` with `select:false`, role, `tokenVersion`)
+- bcrypt password hashing (bcryptjs, cost 12); 72-byte limit enforced
+- JWT access (15m) + refresh (7d) tokens, separate secrets, `type` claim, HS256 pinned
+- Revocation via `tokenVersion` (logout = all devices; role change also revokes)
+- RBAC: `admin` / `operator` / `viewer`, permission table in `src/auth/permissions.js`, `requirePermission()` middleware
+- zod `validate()` middleware — allowlist parsing into `req.valid` (mass-assignment defence)
+- Endpoints: register, login, refresh, logout, me, `PATCH /users/:id/role`
+- `npm run create-admin` bootstrap script (credentials from env vars)
+- User enumeration defences: identical error + equalised timing via a dummy hash
+- JWT secret validation: >= 32 chars, distinct, placeholders refused in production
+
+**Tests**: 83 total (unit: env, permissions matrix, tokens incl. forged/tampered/alg-none/expired,
+passwords incl. 72-byte truncation, schemas; integration: full auth flows, RBAC, concurrent
+duplicate registration -> exactly one 201).
+
+**Mutation check**: deliberately injected 3 security bugs (operator gets `user:manage`; refresh
+ignores `tokenVersion`; raw body passed through) — each was caught by failing tests, then reverted.
+
+**Bug found during smoke test**: the dummy hash for timing equalisation was computed lazily, so
+the FIRST unknown-email login took ~2x longer (~400ms vs ~200ms, measured locally with curl) — a
+timing leak. Fixed by computing it eagerly at startup; re-measured: both paths ~200ms.
+(Local sanity check, not a benchmark.)
+
+**Not done / deferred**: ownership checks (Phase 3), login rate limiting (Phase 24), refresh-token
+rotation with reuse detection (documented as a production improvement in docs/security.md).
