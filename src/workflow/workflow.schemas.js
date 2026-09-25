@@ -57,6 +57,16 @@ export const updateWorkflowSchema = {
 
 export const workflowIdSchema = { params: z.object({ id: objectId }) };
 
+export const scheduleSchema = {
+  params: z.object({ id: objectId }),
+  body: z.object({
+    cron: z.string().trim().min(9).max(100), // detailed validation: assertValidCron
+    timezone: z.string().max(64).default("UTC"),
+    enabled: z.boolean().default(true),
+    input: z.record(z.string(), z.unknown()).default({}),
+  }),
+};
+
 export const listWorkflowsSchema = {
   query: z.object({
     limit: z.coerce.number().int().min(1).max(100).default(20),

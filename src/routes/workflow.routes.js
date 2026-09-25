@@ -8,6 +8,7 @@ import {
   listWorkflowsSchema,
   updateWorkflowSchema,
   workflowIdSchema,
+  scheduleSchema,
 } from "../workflow/workflow.schemas.js";
 
 // authenticate (401) -> requirePermission (403, action level) -> validate (400)
@@ -29,6 +30,10 @@ export function createWorkflowRouter({ workflowService, authenticate }) {
   router.get("/workflows/:id", requirePermission(PERMISSIONS.WORKFLOW_READ), validate(workflowIdSchema), c.get);
   // Editing a definition is the same capability as creating one.
   router.put("/workflows/:id", requirePermission(PERMISSIONS.WORKFLOW_CREATE), validate(updateWorkflowSchema), c.update);
+
+  // Scheduling a workflow is authoring it.
+  router.put("/workflows/:id/schedule", requirePermission(PERMISSIONS.WORKFLOW_CREATE), validate(scheduleSchema), c.setSchedule);
+  router.delete("/workflows/:id/schedule", requirePermission(PERMISSIONS.WORKFLOW_CREATE), validate(workflowIdSchema), c.clearSchedule);
 
   return router;
 }

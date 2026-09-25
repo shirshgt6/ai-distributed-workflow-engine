@@ -15,7 +15,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 9 | Idempotency + distributed locks | ✅ |
 | 10 | Worker heartbeat + crash recovery | ✅ |
 | 11 | Kafka event architecture (transactional outbox) | ✅ |
-| 12 | Scheduled workflows | ⬜ |
+| 12 | Scheduled workflows | ✅ |
 | 13 | LLM provider abstraction | ⬜ |
 | 14 | Structured output + validation | ⬜ |
 | 15 | AI task classification | ⬜ |
@@ -246,3 +246,14 @@ Kafka (KRaft, host port 9095) in docker compose.
 events, relay marking and Kafka-down behaviour, relay leader election, idempotent consumer (duplicate + 5-way race), and a
 **real Kafka round trip** with a forced duplicate publish (8 messages → 4 applied, 4 skipped).
 **Honest limits**: at-least-once, not exactly-once; `task.started` is not transactional; single Kafka broker.
+
+## Phase 12 — Scheduled workflows (cron) ✅
+**Implemented**: `PUT/DELETE /workflows/:id/schedule` (5-field cron, IANA timezone, schedule input; 6-field, per-second
+crons are rejected). `src/scheduler/scheduler.js` runs inside workers, leader-elected with the Redis lock. Each slot uses an
+idempotency key `schedule:<workflowId>:<slot>`. The order is start the run, then advance `nextRunAt` with CAS. There's no
+backfill of missed slots. Executions record `trigger: manual | schedule`.
+**Tests**: 264 total, including timezone maths, invalid cron and timezone, a due run starting once, no backfill after an
+outage, a crash between start and advance deduplicated, two concurrent schedulers → 1 run, **three lock-less "leaders" → still
+1 run** (idempotency is the real guarantee), a broken graph not blocking the schedule, and the API with auth.
+**Bug found by tests**: an unknown timezone ("Mars/Olympus") was accepted, because cron-parser doesn't validate it at parse
+time. It's now validated with `Intl.DateTimeFormat`.

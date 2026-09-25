@@ -36,6 +36,23 @@ const workflowSchema = new Schema(
     // Executions copy `tasks` + `version` when they start (snapshot), so
     // editing a workflow never changes a run that is already in progress.
     version: { type: Number, default: 1 },
+
+    // CRON SCHEDULE (Phase 12). Absent = manual runs only.
+    schedule: {
+      type: new Schema(
+        {
+          cron: { type: String, required: true }, // 5-field, e.g. "0 2 * * *"
+          timezone: { type: String, default: "UTC" }, // IANA, e.g. "Asia/Kolkata"
+          enabled: { type: Boolean, default: true },
+          input: { type: Schema.Types.Mixed, default: {} }, // input for scheduled runs
+          nextRunAt: { type: Date, required: true },
+          lastRunAt: { type: Date, default: null },
+          lastError: { type: String, default: null },
+        },
+        { _id: false, minimize: false }
+      ),
+      default: undefined,
+    },
   },
   {
     timestamps: true,
@@ -52,5 +69,7 @@ const workflowSchema = new Schema(
 
 // Query pattern: "my workflows, newest first" (GET /workflows).
 workflowSchema.index({ ownerId: 1, createdAt: -1 });
+// Scheduler query: "enabled schedules due now", oldest first.
+workflowSchema.index({ "schedule.enabled": 1, "schedule.nextRunAt": 1 }, { sparse: true });
 
 export const Workflow = mongoose.model("Workflow", workflowSchema);

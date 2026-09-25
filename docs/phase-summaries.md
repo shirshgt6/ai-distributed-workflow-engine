@@ -75,3 +75,14 @@ before ticking the register, the next messenger announces it again. So the accou
 line numbers (eventId) and never counts a line twice.
 **Remember:** update the database, then publish, and you lose events on a crash. The outbox gives at-least-once delivery,
 so consumers must dedupe. Never claim exactly-once.
+
+## Phase 12: Scheduled workflows (cron)
+**Built:** attach a cron schedule to a workflow ("every night at 2 am IST"). A scheduler inside the workers (one leader via
+the Redis lock) starts due runs. Each time slot has its own idempotency key, so a slot can never run twice.
+**Real life:** the kitchen has a **"daily orders" calendar**: "every morning at 7, make 50 breakfasts for the hostel". Only
+the **shift manager on duty** (the lock holder) checks the calendar. If two managers accidentally both think they're on
+duty, the order slip for "hostel, 25 Sept, 7 am" has a **unique number**, and the second slip with the same number is
+refused (idempotency). If the kitchen was **closed for 5 hours**, nobody cooks 5 missed breakfasts: make today's one, then
+continue normally (no backfill).
+**Remember:** the lock is an optimization, and the idempotency key is the guarantee. Start the run first, then advance
+the schedule, so a crash in between can only cause a deduplicated retry, never a missed run.

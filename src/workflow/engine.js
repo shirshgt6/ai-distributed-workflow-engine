@@ -236,7 +236,7 @@ export function createEngine({
      *   A duplicate idempotencyKey (same triggeredBy) makes the insert fail
      *   with a duplicate-key error (code 11000); the caller decides how to reply.
      */
-    async startExecution({ workflow, input = {}, triggeredBy, idempotencyKey, requestHash }) {
+    async startExecution({ workflow, input = {}, triggeredBy, trigger = "manual", idempotencyKey, requestHash }) {
       // Defence in depth: definitions saved before graph validation existed
       // (Phase 3) could be invalid. Never start a run that can't finish.
       const check = validateDag(workflow.tasks);
@@ -267,6 +267,7 @@ export function createEngine({
               status: E.RUNNING,
               input,
               triggeredBy,
+              trigger,
               idempotencyKey,
               requestHash,
               startedAt,
@@ -303,6 +304,7 @@ export function createEngine({
           workflowVersion: workflow.version,
           taskCount: workflow.tasks.length,
           triggeredBy: triggeredBy ? String(triggeredBy) : null,
+          trigger,
         });
       });
 
