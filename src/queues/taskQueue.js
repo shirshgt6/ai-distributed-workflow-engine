@@ -37,12 +37,18 @@ const SCRIPTS = {
       return 0`,
   },
 
-  // ENQUEUE LATER: same dedupe, but into the delayed set (retries, Phase 8).
+  // ENQUEUE LATER (retries). The usual caller is a worker whose task just
+  // failed, so the id is still LEASED by that worker. Plain dedupe would say
+  // "already queued" and drop the retry, and the worker's ack would then
+  // erase it entirely (a real bug the Phase 8 tests caught). So: if the id is
+  // leased, MOVE it from leases to delayed; otherwise dedupe as usual.
   wfEnqueueDelayed: {
-    numberOfKeys: 2, // members, delayed
+    numberOfKeys: 3, // members, delayed, leases
     lua: `
       ${NOW_MS}
-      if redis.call('SADD', KEYS[1], ARGV[1]) == 1 then
+      local wasLeased = redis.call('ZREM', KEYS[3], ARGV[1]) == 1
+      local isNew = redis.call('SADD', KEYS[1], ARGV[1]) == 1
+      if wasLeased or isNew then
         redis.call('ZADD', KEYS[2], now + tonumber(ARGV[2]), ARGV[1])
         return 1
       end
@@ -73,12 +79,18 @@ const SCRIPTS = {
       return 0`,
   },
 
-  // ACK: the task's outcome is safely in MongoDB; forget it here.
+  // ACK: the task's outcome is safely in MongoDB; forget it here — but only
+  // if WE still hold the lease. If the lease is gone (moved to delayed for a
+  // retry, or reaped and requeued), the id's membership belongs to that new
+  // entry and must be kept.
   wfAck: {
     numberOfKeys: 2, // leases, members
     lua: `
-      redis.call('ZREM', KEYS[1], ARGV[1])
-      return redis.call('SREM', KEYS[2], ARGV[1])`,
+      if redis.call('ZREM', KEYS[1], ARGV[1]) == 1 then
+        redis.call('SREM', KEYS[2], ARGV[1])
+        return 1
+      end
+      return 0`,
   },
 
   // REAPER: leases whose deadline passed -> back to the ready list.
@@ -142,9 +154,10 @@ export function createTaskQueue(redis, { prefix = "wf:q" } = {}) {
       return (await redis.wfEnqueue(keys.members, keys.ready, String(taskId))) === 1;
     },
 
-    /** Make the task ready after `delayMs` (used for retry backoff). */
+    /** Make the task ready after `delayMs` (retry backoff). Takes over its lease if it has one. */
     async enqueueDelayed(taskId, delayMs) {
-      return (await redis.wfEnqueueDelayed(keys.members, keys.delayed, String(taskId), Math.max(0, Math.round(delayMs)))) === 1;
+      const delay = Math.max(0, Math.round(delayMs));
+      return (await redis.wfEnqueueDelayed(keys.members, keys.delayed, keys.leases, String(taskId), delay)) === 1;
     },
 
     /**
@@ -160,7 +173,7 @@ export function createTaskQueue(redis, { prefix = "wf:q" } = {}) {
       return (await redis.wfExtendLease(keys.leases, String(taskId), Math.round(leaseMs))) === 1;
     },
 
-    /** Done with this task (its result is already stored in MongoDB). */
+    /** Done with this task (its result is already stored in MongoDB). false = lease no longer ours. */
     async ack(taskId) {
       return (await redis.wfAck(keys.leases, keys.members, String(taskId))) === 1;
     },

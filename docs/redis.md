@@ -1,7 +1,8 @@
 # Redis: the task queue
 
 > **Implemented (Phase 6):** a reliable queue with leases, a reaper, delayed tasks and dedupe (`src/queues/taskQueue.js`), plus a queue worker (`src/workers/queueWorker.js`).
-> **Not yet:** distributed locks (Phase 9), rate limiting (Phase 24), worker heartbeats and registry (Phase 10). The worker still runs inside the API process; separate worker processes come in Phase 7.
+> Workers run as **separate processes** (`npm run worker`, Phase 7). Retries use the delayed set (Phase 8).
+> **Not yet:** distributed locks, rate limiting, worker heartbeats and registry.
 
 ## Responsibilities
 
@@ -36,9 +37,10 @@ Only **ids** are stored in Redis. Everything else about a task lives in MongoDB.
 | `enqueue(id)` | `SADD members`; only if new, `RPUSH ready` | the reconciler can re-enqueue freely without creating duplicates |
 | `claim(leaseMs)` | `LPOP ready` + `ZADD leases now+leaseMs` | **the fix for Project 1's lost jobs**: an id is always in `ready` or in `leases`, never neither |
 | `extendLease(id, ms)` | only if still leased: move the deadline | a worker whose lease was reaped learns it no longer owns the task |
-| `ack(id)` | `ZREM leases` + `SREM members` | |
+| `ack(id)` | only if the lease still exists: `ZREM leases` + `SREM members` | a late ack must not erase a retry or a requeued entry |
 | `requeueExpired()` | expired leases → `ready` | reaper. Concurrent reapers move each id once |
-| `enqueueDelayed(id, ms)` / `promoteDue()` | delayed ZSET → `ready` when due | Project 1 did `ZRANGEBYSCORE` then `ZREM` as separate round trips |
+| `enqueueDelayed(id, ms)` | if the id is **leased** (the worker whose attempt just failed), move it from leases to delayed; otherwise dedupe as usual | the retry must survive the worker's subsequent `ack` |
+| `promoteDue()` | delayed ZSET → `ready` when due | Project 1 did `ZRANGEBYSCORE` then `ZREM` as separate round trips |
 
 **Time comes from Redis (`TIME` inside the script).** Workers on machines with skewed clocks still agree on when a
 lease expires. The MongoDB lease uses MongoDB's clock (`$$NOW`) for the same reason.
@@ -87,6 +89,6 @@ The reconciler (`engine.reconcile`, every `RECONCILE_INTERVAL_MS`) treats MongoD
 ## Known limitations
 - **No heartbeat yet.** The lease is fixed at `timeoutMs + grace`, so a very long task needs a long lease, and a dead
   worker is only noticed when that lease ends. Phase 10 adds heartbeats (short leases, renewed while alive).
-- **No attempt limit on takeovers.** A task that crashes its worker every time (a "poison pill") would be taken over
-  forever. Retry limits and dead-lettering arrive in Phase 8.
+- **Horizontal scaling (smoke-tested):** 3 worker processes × concurrency 2 ran six 1-second tasks of one run in
+  about 1.2 s of wall-clock time, on one laptop, with each worker taking 2. That's a local sanity check, not a benchmark.
 - **Single Redis node.** No replication or failover. The reconciler limits the damage of data loss, but not downtime.

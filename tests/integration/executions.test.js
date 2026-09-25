@@ -104,11 +104,82 @@ test("failure is fail-fast: execution FAILED, downstream CANCELLED", async () =>
   expect(t.C.error).toBe("card declined");
 });
 
-test("a handler exceeding its timeout fails the task", async () => {
-  const wf = await createWorkflow(alice.token, [{ key: "slow", type: "delay", config: { ms: 2000 }, timeoutMs: 100 }]);
+test("a handler exceeding its timeout is retried (timeouts are transient), then dead-lettered", async () => {
+  const wf = await createWorkflow(alice.token, [
+    { key: "slow", type: "delay", config: { ms: 2000 }, timeoutMs: 100, retryPolicy: { maxAttempts: 2, baseDelayMs: 10 } },
+  ]);
   const { execution, tasks } = await runAndWait(alice.token, wf.id);
   expect(execution.status).toBe("FAILED");
+  expect(tasks[0]).toMatchObject({ status: "DEAD_LETTER", attempt: 2 });
   expect(tasks[0].error).toMatch(/timed out after 100ms/);
+});
+
+test("a flaky task succeeds on its 3rd attempt and the run completes", async () => {
+  const wf = await createWorkflow(alice.token, [
+    { key: "flaky", type: "flaky", config: { failTimes: 2 }, retryPolicy: { maxAttempts: 3, baseDelayMs: 10 } },
+    { key: "after", type: "echo", dependsOn: ["flaky"] },
+  ]);
+  const { execution, tasks } = await runAndWait(alice.token, wf.id);
+  expect(execution.status).toBe("COMPLETED");
+  const t = byKey(tasks);
+  expect(t.flaky).toMatchObject({ status: "COMPLETED", attempt: 3, output: { succeededOnAttempt: 3 } });
+  expect(t.after.output.parents).toEqual({ flaky: { succeededOnAttempt: 3 } });
+});
+
+describe("idempotent POST /workflows/:id/run", () => {
+  let wf;
+  beforeAll(async () => {
+    wf = await createWorkflow(alice.token, [{ key: "A", type: "noop" }], "idem");
+  });
+  const runWithKey = (key, input = {}, token = alice.token) =>
+    as(app, token).post(`/workflows/${wf.id}/run`).set("Idempotency-Key", key).send({ input });
+
+  test("same key + same request -> the SAME execution, flagged as a replay", async () => {
+    const first = await runWithKey("order-12345-click", { order: 1 });
+    const again = await runWithKey("order-12345-click", { order: 1 });
+    expect(first.status).toBe(202);
+    expect(again.status).toBe(202);
+    expect(again.body.execution.id).toBe(first.body.execution.id);
+    expect(again.headers["idempotent-replayed"]).toBe("true");
+    expect(first.headers["idempotent-replayed"]).toBeUndefined();
+    expect(await WorkflowExecution.countDocuments({ idempotencyKey: "order-12345-click" })).toBe(1);
+  });
+
+  test("key order inside the input doesn't matter (canonical hash)", async () => {
+    const a = await runWithKey("order-canon-1", { x: 1, y: 2 });
+    const b = await runWithKey("order-canon-1", { y: 2, x: 1 });
+    expect(b.body.execution.id).toBe(a.body.execution.id);
+  });
+
+  test("same key + DIFFERENT request -> 422, nothing new created", async () => {
+    await runWithKey("order-777-click", { order: 7 });
+    const res = await runWithKey("order-777-click", { order: 8 });
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe("IDEMPOTENCY_KEY_REUSED");
+    expect(await WorkflowExecution.countDocuments({ idempotencyKey: "order-777-click" })).toBe(1);
+  });
+
+  test("RACE: 5 simultaneous requests with one key -> exactly ONE execution", async () => {
+    const results = await Promise.all(Array.from({ length: 5 }, () => runWithKey("double-click-race", { n: 1 })));
+    expect(results.every((r) => r.status === 202)).toBe(true);
+    expect(new Set(results.map((r) => r.body.execution.id)).size).toBe(1);
+    expect(await WorkflowExecution.countDocuments({ idempotencyKey: "double-click-race" })).toBe(1);
+  });
+
+  test("keys are per user: another user's identical key is independent", async () => {
+    const wfBob = await createWorkflow(bob.token, [{ key: "A", type: "noop" }], "bob-idem");
+    const aliceRun = await runWithKey("shared-key-123");
+    const bobRun = await as(app, bob.token).post(`/workflows/${wfBob.id}/run`).set("Idempotency-Key", "shared-key-123").send({});
+    expect(bobRun.status).toBe(202);
+    expect(bobRun.body.execution.id).not.toBe(aliceRun.body.execution.id);
+  });
+
+  test("malformed key -> 400; no key -> every call is a new run", async () => {
+    expect((await runWithKey("short")).status).toBe(400);
+    const r1 = await as(app, alice.token).post(`/workflows/${wf.id}/run`).send({});
+    const r2 = await as(app, alice.token).post(`/workflows/${wf.id}/run`).send({});
+    expect(r1.body.execution.id).not.toBe(r2.body.execution.id);
+  });
 });
 
 test("editing the workflow does not change a run already created (snapshot)", async () => {

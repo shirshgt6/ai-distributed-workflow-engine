@@ -42,6 +42,7 @@ const taskSchema = new Schema(
     output: { type: Schema.Types.Mixed, default: null },
     error: { type: String, default: null },
     readyAt: { type: Date, default: null }, // when it became READY (reconciler finds stuck ones)
+    retryAt: { type: Date, default: null }, // when a RETRYING task is due (reconciler finds lost wake-ups)
     queuedAt: { type: Date, default: null }, // when it was handed to the executor
     startedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
@@ -73,5 +74,7 @@ taskSchema.index({ executionId: 1, status: 1 });
 taskSchema.index({ status: 1, leaseExpiresAt: 1 });
 // Reconciler: "READY tasks nobody dispatched" (crash between commit and dispatch).
 taskSchema.index({ status: 1, readyAt: 1 });
+// Reconciler: "RETRYING tasks whose wake-up was lost".
+taskSchema.index({ status: 1, retryAt: 1 });
 
 export const Task = mongoose.model("Task", taskSchema);

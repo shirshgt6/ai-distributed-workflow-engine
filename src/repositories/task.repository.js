@@ -36,9 +36,14 @@ export async function transitionTask(taskId, from, to, { set = {}, inc, where = 
  * increments `attempt`, increments the fencing `leaseToken`, and sets a
  * lease deadline. Claimable when the task is either:
  *
- *   QUEUED                              (the normal case), or
+ *   QUEUED                              (the normal case),
+ *   RETRYING                            (its backoff delay elapsed in Redis;
+ *                                        logically RETRYING -> QUEUED -> RUNNING), or
  *   RUNNING with an EXPIRED lease       (TAKEOVER: the previous worker died
  *                                        or hung past timeout + grace)
+ *
+ * RETRYING is claimable as soon as the delayed queue releases it; the delay
+ * is enforced by Redis (one clock), not re-checked against retryAt here.
  *
  * A takeover is logically RUNNING -> QUEUED -> RUNNING done in one step; the
  * new leaseToken fences off any late report from the dead attempt.
@@ -59,11 +64,13 @@ export async function transitionTask(taskId, from, to, { set = {}, inc, where = 
 export async function claimTask(taskId, workerId, { leaseGraceMs }) {
   assertTransition("task", TASK_STATUS.QUEUED, TASK_STATUS.RUNNING);
   assertTransition("task", TASK_STATUS.RUNNING, TASK_STATUS.QUEUED); // takeover path
+  assertTransition("task", TASK_STATUS.RETRYING, TASK_STATUS.QUEUED); // retry path
   return Task.findOneAndUpdate(
     {
       _id: taskId,
       $or: [
         { status: TASK_STATUS.QUEUED },
+        { status: TASK_STATUS.RETRYING },
         { status: TASK_STATUS.RUNNING, $expr: { $lt: ["$leaseExpiresAt", "$$NOW"] } },
       ],
     },

@@ -33,6 +33,13 @@ const workflowExecutionSchema = new Schema(
     // fresh data, sees 0, and completes the execution.
     pendingTasks: { type: Number, required: true },
     triggeredBy: { type: Schema.Types.ObjectId, ref: "User" },
+    // IDEMPOTENCY: the client's Idempotency-Key header and a hash of the
+    // request it came with. Stored ON the execution, and protected by a
+    // unique index, so "create the run" and "remember the key" happen in the
+    // same atomic insert. There's no separate record that could be left
+    // half-written if we crashed between the two.
+    idempotencyKey: { type: String, default: undefined },
+    requestHash: { type: String, default: undefined },
     startedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
     error: { type: String, default: null },
@@ -44,6 +51,7 @@ const workflowExecutionSchema = new Schema(
         ret.id = String(ret._id);
         delete ret._id;
         delete ret.__v;
+        delete ret.requestHash;
         return ret;
       },
     },
@@ -57,5 +65,11 @@ const workflowExecutionSchema = new Schema(
 workflowExecutionSchema.index({ workflowId: 1, createdAt: -1 });
 workflowExecutionSchema.index({ ownerId: 1, createdAt: -1 });
 workflowExecutionSchema.index({ status: 1 });
+// One execution per (user, idempotency key). Partial: runs without a key
+// are unconstrained.
+workflowExecutionSchema.index(
+  { triggeredBy: 1, idempotencyKey: 1 },
+  { unique: true, partialFilterExpression: { idempotencyKey: { $type: "string" } } }
+);
 
 export const WorkflowExecution = mongoose.model("WorkflowExecution", workflowExecutionSchema);

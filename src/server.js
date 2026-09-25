@@ -1,4 +1,3 @@
-import os from "node:os";
 import dotenv from "dotenv";
 import { loadConfig } from "./config/env.js";
 import { createLogger } from "./config/logger.js";
@@ -15,9 +14,7 @@ import { Task } from "./models/task.model.js";
 import { TaskExecution } from "./models/taskExecution.model.js";
 import { createEngine } from "./workflow/engine.js";
 import { createTaskQueue } from "./queues/taskQueue.js";
-import { createQueueWorker } from "./workers/queueWorker.js";
 import { createExecutionService } from "./services/execution.service.js";
-import { handlers } from "./handlers/index.js";
 
 // Composition root: the ONE place that reads config, creates real
 // connections and wires them into the app. Everything else receives its
@@ -45,32 +42,15 @@ async function main() {
   const engine = createEngine({
     models: { WorkflowExecution, Task, TaskExecution },
     enqueue: (item) => queue.enqueue(item.taskId),
+    enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
     leaseGraceMs: config.worker.leaseGraceMs,
   });
   const executionService = createExecutionService({ Workflow, WorkflowExecution, Task, engine });
 
-  // Phase 6: the worker still runs inside the API process, but it now pulls
-  // from Redis, so it survives restarts and could be moved to its own process
-  // (Phase 7) without changing the engine.
-  const worker = createQueueWorker({
-    queue,
-    engine,
-    handlers,
-    logger,
-    workerId: `${os.hostname()}-${process.pid}`,
-    concurrency: config.worker.concurrency,
-    pollIntervalMs: config.worker.pollIntervalMs,
-    claimLeaseMs: config.worker.claimLeaseMs,
-    leaseGraceMs: config.worker.leaseGraceMs,
-  });
-  worker.start();
-
-  const reconcileTimer = setInterval(() => {
-    engine
-      .reconcile({ staleMs: config.reconciler.staleMs })
-      .catch((err) => logger.error({ err: err.message }, "reconciler run failed"));
-  }, config.reconciler.intervalMs);
+  // The API only STARTS runs (MongoDB + enqueue to Redis). Tasks are executed
+  // by separate worker processes: `npm run worker` (src/worker.js). The
+  // reconciler runs in the workers too.
 
   let shuttingDown = false;
 
@@ -119,11 +99,6 @@ async function main() {
     forceExit.unref(); // this timer alone must not keep the process alive
 
     await new Promise((resolve) => server.close(resolve));
-    clearInterval(reconcileTimer);
-    // Let running task handlers finish and REPORT before the DB connection
-    // closes; otherwise their results would be lost. Unclaimed tasks simply
-    // stay in Redis for the next worker.
-    await worker.stop();
     await Promise.allSettled([disconnectMongo(), redis.quit()]);
 
     logger.info("shutdown complete");

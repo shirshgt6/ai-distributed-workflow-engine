@@ -10,8 +10,10 @@ import { TaskExecution } from "../../src/models/taskExecution.model.js";
 import { EXECUTION_STATUS as E, TASK_STATUS as T } from "../../src/workflow/states.js";
 import { MONGO_URI, logger } from "../helpers/testApp.js";
 import { sleep } from "../../src/handlers/index.js";
+import { NonRetryableError } from "../../src/workers/retry.js";
 
 let enqueued = [];
+let delayed = []; // [key, delayMs] scheduled retries
 let redisDown = false; // flip to simulate the queue being unreachable
 const engine = createEngine({
   models: { WorkflowExecution, Task, TaskExecution },
@@ -19,8 +21,14 @@ const engine = createEngine({
     if (redisDown) throw new Error("connect ECONNREFUSED (simulated)");
     enqueued.push(item.key);
   },
+  enqueueDelayed: async (item, delayMs) => {
+    if (redisDown) throw new Error("connect ECONNREFUSED (simulated)");
+    const t = await Task.findById(item.taskId).select("key");
+    delayed.push([t.key, delayMs]);
+  },
   logger,
   leaseGraceMs: 50, // running lease = task.timeoutMs + 50ms (short, for takeover tests)
+  backoff: (attempt, baseDelayMs) => baseDelayMs * 2 ** (attempt - 1), // no jitter: deterministic
 });
 
 const ownerId = new mongoose.Types.ObjectId();
@@ -64,6 +72,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   enqueued = [];
+  delayed = [];
   redisDown = false;
   await Promise.all([WorkflowExecution.deleteMany({}), Task.deleteMany({}), TaskExecution.deleteMany({})]);
 });
@@ -212,7 +221,7 @@ describe("failure (fail-fast)", () => {
     await startAndComplete(_id, "A");
     const [b, c] = await Promise.all([start(_id, "B"), start(_id, "C")]);
 
-    await engine.failTask({ taskId: c._id, leaseToken: c.leaseToken, error: new Error("boom") });
+    await engine.failTask({ taskId: c._id, leaseToken: c.leaseToken, error: new NonRetryableError("boom") });
 
     let execution = await WorkflowExecution.findById(_id);
     expect(execution.status).toBe(E.FAILED);
@@ -321,5 +330,109 @@ describe("leases and takeover", () => {
     const { _id } = await engine.startExecution({ workflow: workflowOf({ ...def("A"), timeoutMs: 1000 }) });
     const a = await start(_id, "A");
     expect(a.leaseExpiresAt - a.startedAt).toBe(1000 + 50);
+  });
+});
+
+describe("retries, backoff and dead-lettering (Phase 8)", () => {
+  // maxAttempts 3, baseDelayMs 1000 (from def()).
+  async function failAttempt(executionId, key, error) {
+    const task = await start(executionId, key);
+    return engine.failTask({ taskId: task._id, leaseToken: task.leaseToken, error });
+  }
+
+  test("a transient error is RETRIED with exponential backoff (1s, 2s), not failed", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+
+    const r1 = await failAttempt(_id, "A", new Error("ECONNRESET"));
+    expect(r1).toMatchObject({ applied: true, outcome: T.RETRYING, delayMs: 1000 });
+    let a = await taskByKey(_id, "A");
+    expect(a).toMatchObject({ status: T.RETRYING, attempt: 1, error: "ECONNRESET", leaseOwner: null });
+    expect(a.retryAt).toBeInstanceOf(Date);
+    expect(delayed).toEqual([["A", 1000]]);
+
+    const r2 = await failAttempt(_id, "A", new Error("ECONNRESET")); // RETRYING is claimable
+    expect(r2).toMatchObject({ outcome: T.RETRYING, delayMs: 2000 });
+    a = await taskByKey(_id, "A");
+    expect(a.attempt).toBe(2);
+    expect(await executionState(_id)).toEqual({ status: E.RUNNING, pendingTasks: 1 }); // not finished yet
+  });
+
+  test("retry then success: the execution completes and history shows every attempt", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+    await failAttempt(_id, "A", new Error("blip"));
+    await startAndComplete(_id, "A");
+    expect(await executionState(_id)).toEqual({ status: E.COMPLETED, pendingTasks: 0 });
+    const attempts = await TaskExecution.find({}).sort({ attempt: 1 });
+    expect(attempts.map((x) => [x.attempt, x.status, x.error?.retryable ?? null])).toEqual([
+      [1, "FAILED", true],
+      [2, "SUCCEEDED", null],
+    ]);
+  });
+
+  test("attempts exhausted -> DEAD_LETTER, and the run fails (fail-fast)", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A"), def("B", "A")) });
+    await failAttempt(_id, "A", new Error("still down"));
+    await failAttempt(_id, "A", new Error("still down"));
+    const last = await failAttempt(_id, "A", new Error("still down")); // attempt 3 of 3
+
+    expect(last.outcome).toBe(T.DEAD_LETTER);
+    expect((await taskByKey(_id, "A")).status).toBe(T.DEAD_LETTER);
+    expect((await taskByKey(_id, "B")).status).toBe(T.CANCELLED);
+    const execution = await WorkflowExecution.findById(_id);
+    expect(execution.status).toBe(E.FAILED);
+    expect(execution.error).toBe('Task "A" failed after 3 attempt(s) and was dead-lettered: still down');
+    expect(delayed).toHaveLength(2); // only the first two failures scheduled a retry
+  });
+
+  test("a NON-retryable error fails immediately, no retry", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+    const r = await failAttempt(_id, "A", new NonRetryableError("card declined"));
+    expect(r.outcome).toBe(T.FAILED);
+    expect(delayed).toEqual([]);
+    expect(await executionState(_id)).toEqual({ status: E.FAILED, pendingTasks: 0 });
+  });
+
+  test("no retries once the run has already failed (a sibling failed)", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A"), def("B")) });
+    const [a, b] = await Promise.all([start(_id, "A"), start(_id, "B")]);
+    await engine.failTask({ taskId: a._id, leaseToken: a.leaseToken, error: new NonRetryableError("fatal") });
+    const r = await engine.failTask({ taskId: b._id, leaseToken: b.leaseToken, error: new Error("transient") });
+    expect(r.outcome).toBe(T.FAILED);
+    expect(delayed).toEqual([]);
+  });
+
+  test("a task waiting to RETRY is cancelled if the run fails meanwhile", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A"), def("B")) });
+    await failAttempt(_id, "A", new Error("blip")); // A -> RETRYING
+    await failAttempt(_id, "B", new NonRetryableError("fatal")); // run fails
+    expect((await taskByKey(_id, "A")).status).toBe(T.CANCELLED);
+    expect(await executionState(_id)).toEqual({ status: E.FAILED, pendingTasks: 0 });
+  });
+
+  test("POISON PILL: takeovers count as attempts; past maxAttempts the task is dead-lettered, not run", async () => {
+    const { _id } = await engine.startExecution({
+      workflow: workflowOf({ ...def("A"), timeoutMs: 100, retryPolicy: { maxAttempts: 2, baseDelayMs: 10 } }),
+    });
+    await start(_id, "A"); // attempt 1: worker dies
+    await sleep(200);
+    const a = await taskByKey(_id, "A");
+    expect((await engine.startTask(a._id, "w2")).task.attempt).toBe(2); // takeover, worker dies again
+    await sleep(200);
+    expect(await engine.startTask(a._id, "w3")).toBeNull(); // attempt 3 > 2: refused
+    expect((await taskByKey(_id, "A")).status).toBe(T.DEAD_LETTER);
+    expect((await WorkflowExecution.findById(_id)).error).toMatch(/Exceeded 2 attempts/);
+  });
+
+  test("reconciler re-enqueues a retry whose delayed wake-up was lost", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+    redisDown = true;
+    await failAttempt(_id, "A", new Error("blip")); // RETRYING committed, scheduling failed
+    redisDown = false;
+    expect(delayed).toEqual([]);
+    await Task.updateOne({ executionId: _id, key: "A" }, { $set: { retryAt: new Date(Date.now() - 60_000) } });
+    enqueued = [];
+    const counts = await engine.reconcile({ staleMs: 10_000 });
+    expect(counts.retrying).toBe(1);
+    expect(enqueued).toEqual(["A"]);
   });
 });

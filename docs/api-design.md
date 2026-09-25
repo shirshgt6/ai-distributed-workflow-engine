@@ -29,6 +29,7 @@ Only implemented endpoints are listed. An OpenAPI/Swagger spec comes in Phase 27
 | 404 | `NOT_FOUND` |
 | 409 | `EMAIL_TAKEN`, `VERSION_CONFLICT` |
 | 413 | `PAYLOAD_TOO_LARGE` |
+| 422 | `IDEMPOTENCY_KEY_REUSED` (same key sent with a different request) |
 | 500 | `INTERNAL_ERROR` (details only in logs) |
 | 503 | Not ready (`/ready`) |
 
@@ -74,8 +75,14 @@ Pagination is offset-based (simple). Known trade-offs: deep pages get slower, an
 ### Executions
 | Method | Path | Permission | Body | Success |
 |---|---|---|---|---|
-| POST | `/workflows/:id/run` | `workflow:run` | `{ input?: object }` | **202** `{ execution }` + `Location: /executions/:id`. 404 if the workflow is missing or not yours; 400 `INVALID_WORKFLOW_GRAPH` for a stored invalid graph |
+| POST | `/workflows/:id/run` | `workflow:run` | `{ input?: object }`, optional header `Idempotency-Key` (8–128 chars) | **202** `{ execution }` + `Location: /executions/:id`. 404 if the workflow is missing or not yours; 400 `INVALID_WORKFLOW_GRAPH` for a stored invalid graph |
 | GET | `/executions/:id` | `workflow:read` | — | 200 `{ execution, tasks[] }` (tasks: key, type, status, dependsOn, attempt, output, error, timestamps); 404 if not yours |
 
 A run is asynchronous. The client polls `GET /executions/:id` until `execution.status` is `COMPLETED` or `FAILED`.
 The execution belongs to the **workflow's owner** (so they can see it), and `triggeredBy` records who started it.
+
+**Idempotent runs.** Send `Idempotency-Key: <uuid>` (generated once per user action, reused on retries):
+- same key + same `(workflowId, input)` → **202** with the *same* execution and `Idempotent-Replayed: true`
+- same key + different request → **422 `IDEMPOTENCY_KEY_REUSED`**
+- keys are scoped per user. The check is a unique index on `(triggeredBy, idempotencyKey)` of the execution itself,
+  so concurrent duplicates also produce exactly one run (tested with 5 simultaneous requests).

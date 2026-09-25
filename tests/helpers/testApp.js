@@ -53,8 +53,10 @@ export function createTestStack({ concurrency = 4, leaseGraceMs = 2000, workerId
   const engine = createEngine({
     models: { WorkflowExecution, Task, TaskExecution },
     enqueue: (item) => queue.enqueue(item.taskId),
+    enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
     leaseGraceMs,
+    backoff: (attempt) => 20 * attempt, // fast, deterministic retries in tests
   });
   const worker = createQueueWorker({
     queue,
