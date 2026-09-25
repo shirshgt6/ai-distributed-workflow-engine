@@ -13,6 +13,10 @@ import { createQueueWorker } from "./workers/queueWorker.js";
 import { handlers } from "./handlers/index.js";
 import { Worker } from "./models/worker.model.js";
 import { createWorkerRegistry } from "./workers/registry.js";
+import { OutboxEvent } from "./models/outboxEvent.model.js";
+import { createLock } from "./queues/lock.js";
+import { createOutboxRelay, createRelayRunner } from "./events/relay.js";
+import { createKafkaPublisher } from "./events/kafka.js";
 
 // WORKER PROCESS ENTRYPOINT:  npm run worker
 //
@@ -37,7 +41,7 @@ async function main() {
 
   const queue = createTaskQueue(redis);
   const engine = createEngine({
-    models: { WorkflowExecution, Task, TaskExecution },
+    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent },
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
@@ -67,6 +71,29 @@ async function main() {
   });
   await worker.start();
 
+  // OUTBOX RELAY: every worker runs one, but only the holder of the
+  // "outbox-relay" lock publishes (leader election). If Kafka is down, events
+  // simply wait in MongoDB; task execution is unaffected.
+  const publisher = createKafkaPublisher({
+    brokers: config.kafka.brokers,
+    topic: config.kafka.topic,
+    clientId: `relay-${workerId}`,
+    logger,
+  });
+  let relayRunner = null;
+  try {
+    await publisher.connect();
+    relayRunner = createRelayRunner({
+      relay: createOutboxRelay({ OutboxEvent, publish: publisher.publish, logger }),
+      lock: createLock(redis, "outbox-relay", { ttlMs: Math.max(3000, config.kafka.relayIntervalMs * 6) }),
+      intervalMs: config.kafka.relayIntervalMs,
+      logger,
+    });
+    relayRunner.start();
+  } catch (err) {
+    logger.warn({ err: err.message }, "Kafka unavailable; outbox events will stay in MongoDB until a worker can relay them");
+  }
+
   // Every worker also runs the reconciler. Its steps are CAS or idempotent
   // enqueues, so several workers reconciling at once is safe (just redundant).
   const reconcileTimer = setInterval(() => {
@@ -94,6 +121,8 @@ async function main() {
 
     clearInterval(reconcileTimer);
     await worker.stop();
+    if (relayRunner) await relayRunner.stop();
+    await publisher.disconnect().catch(() => {});
     await Promise.allSettled([disconnectMongo(), redis.quit()]);
     logger.info("worker stopped");
     process.exit(0);

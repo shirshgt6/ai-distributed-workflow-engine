@@ -62,3 +62,16 @@ explanations live in the other docs; this is the revision map.
 **Built:** the running-task lease is now a short `LEASE_TTL_MS`, **renewed every TTL/3 while the handler runs** (heartbeat). A lost renewal aborts the handler. There's a worker registry (Redis TTL key + Mongo doc) at `GET /workers` (ACTIVE / UNRESPONSIVE / STOPPED), and `POST /executions/:id/pause|resume|cancel`.
 **Real life:** every cook shouts "**still cooking!**" every 5 minutes. If a cook goes silent for 15 minutes, someone else takes over the dish, even for a 2-hour biryani (the heartbeat lets long dishes keep their lease without a huge timeout). **Pause**: "don't start new dishes, finish what's on the stove". **Cancel**: the customer left, so every dish is crossed off; a cook notices at their next "still cooking!" shout and stops.
 **Remember:** a heartbeat is a failure *detector*, not proof of death. Correctness still comes from leases and fencing.
+
+## Phase 11: Kafka events through a transactional outbox
+**Built:** every state change writes an event row in the **same MongoDB transaction** (outbox). A relay (one leader,
+using the Redis lock) publishes the rows to a Kafka topic. An analytics consumer group counts events, and skips duplicates
+using a processed-events table updated in the same transaction as the count.
+**Real life:** the kitchen has a **"news register"** next to the whiteboard. Whenever a cook updates the board ("dal
+ready"), they write the same line in the register **in the same stroke**, never one without the other. A **messenger boy**
+(the relay; only one has the register key at a time) reads new lines and announces them on the **loudspeaker** (Kafka).
+Accounts, the manager and the owner each listen separately (consumer groups). If the messenger faints after announcing but
+before ticking the register, the next messenger announces it again. So the accountant keeps a **"heard already"** list of
+line numbers (eventId) and never counts a line twice.
+**Remember:** update the database, then publish, and you lose events on a crash. The outbox gives at-least-once delivery,
+so consumers must dedupe. Never claim exactly-once.

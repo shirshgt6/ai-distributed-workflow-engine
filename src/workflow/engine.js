@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
 import { validateDag } from "./dag.js";
 import { assertTransition, EXECUTION_STATUS as E, TASK_STATUS as T } from "./states.js";
@@ -23,7 +24,7 @@ import { computeBackoff, isRetryable } from "../workers/retry.js";
  * Redis queue (src/queues/taskQueue.js); workers pull from there.
  *
  * @param {{
- *   models: { WorkflowExecution, Task, TaskExecution },
+ *   models: { WorkflowExecution, Task, TaskExecution, OutboxEvent? },
  *   enqueue: (item: { taskId: string, executionId: string, key: string }) => void | Promise<void>,
  *   enqueueDelayed?: (item: { taskId: string }, delayMs: number) => void | Promise<void>,
  *   logger: import('pino').Logger,
@@ -44,9 +45,23 @@ export function createEngine({
   backoff = computeBackoff,
   connection = mongoose.connection,
 }) {
-  const { WorkflowExecution, Task, TaskExecution } = models;
+  const { WorkflowExecution, Task, TaskExecution, OutboxEvent } = models;
 
   const now = () => new Date();
+
+  /**
+   * TRANSACTIONAL OUTBOX (Phase 11): record a lifecycle event in the SAME
+   * transaction as the state change it describes. Both commit or neither
+   * does, so Kafka can never hear about a change that rolled back, and a
+   * committed change can never lose its event. The relay publishes it later.
+   */
+  async function emit(session, type, executionId, payload = {}) {
+    if (!OutboxEvent) return;
+    await OutboxEvent.create(
+      [{ eventId: randomUUID(), type, aggregateId: String(executionId), payload }],
+      session ? { session } : undefined
+    );
+  }
 
   /**
    * Hand every READY task of an execution to the executor.
@@ -117,8 +132,19 @@ export function createEngine({
      */
     async pauseExecution(executionId) {
       assertTransition("execution", E.RUNNING, E.PAUSED);
-      const r = await WorkflowExecution.updateOne({ _id: executionId, status: E.RUNNING }, { $set: { status: E.PAUSED } });
-      return r.modifiedCount === 1;
+      let paused = false;
+      await connection.transaction(async (session) => {
+        paused = false;
+        const r = await WorkflowExecution.updateOne(
+          { _id: executionId, status: E.RUNNING },
+          { $set: { status: E.PAUSED } },
+          { session }
+        );
+        if (r.modifiedCount !== 1) return;
+        await emit(session, "execution.paused", executionId);
+        paused = true;
+      });
+      return paused;
     },
 
     /**
@@ -137,6 +163,7 @@ export function createEngine({
           { returnDocument: "after", session }
         );
         if (!execution) return;
+        await emit(session, "execution.resumed", executionId);
         await Task.updateMany(
           { executionId, status: T.PENDING, remainingDeps: 0 },
           { $set: { status: T.READY, readyAt: now() } },
@@ -148,6 +175,7 @@ export function createEngine({
             { $set: { status: E.COMPLETED, completedAt: now() } },
             { session }
           );
+          await emit(session, "execution.completed", executionId);
         }
         resumed = true;
       });
@@ -186,6 +214,7 @@ export function createEngine({
           { $set: { status: E.CANCELLED, completedAt: now(), error: "Cancelled by user" }, $inc: { pendingTasks: -r.modifiedCount } },
           { session }
         );
+        await emit(session, "execution.cancelled", executionId, { cancelledTasks: r.modifiedCount });
         cancelled = true;
       });
       return cancelled;
@@ -269,6 +298,12 @@ export function createEngine({
           };
         });
         await Task.insertMany(tasks, { session });
+        await emit(session, "execution.started", execution._id, {
+          workflowId: String(workflow._id),
+          workflowVersion: workflow.version,
+          taskCount: workflow.tasks.length,
+          triggeredBy: triggeredBy ? String(triggeredBy) : null,
+        });
       });
 
       logger.info(
@@ -306,6 +341,15 @@ export function createEngine({
         attempt: task.attempt,
         workerId,
         leaseToken: task.leaseToken,
+      });
+      // Not transactional (the claim isn't a transaction): if we crash between
+      // the claim and this line, this one informational event is lost. State
+      // changes that matter (completed / failed) are always transactional.
+      await emit(null, "task.started", task.executionId, {
+        taskId: String(task._id),
+        key: task.key,
+        attempt: task.attempt,
+        workerId,
       });
 
       // POISON-PILL GUARD. Takeovers also consume attempts. A task whose
@@ -416,9 +460,16 @@ export function createEngine({
             { $set: { status: E.COMPLETED, completedAt: finishedAt } },
             { session }
           );
+          await emit(session, "execution.completed", execution._id);
           logger.info({ executionId: String(execution._id) }, "execution completed");
         }
 
+        await emit(session, "task.completed", task.executionId, {
+          taskId: String(task._id),
+          key: task.key,
+          attempt: task.attempt,
+          durationMs: task.startedAt ? finishedAt - task.startedAt : null,
+        });
         applied = true;
       });
 
@@ -494,6 +545,13 @@ export function createEngine({
             session,
           });
           if (!won) return;
+          await emit(session, "task.retrying", task.executionId, {
+            taskId: String(task._id),
+            key: task.key,
+            attempt: task.attempt,
+            delayMs,
+            error: message,
+          });
           retryTask = task;
           result = { applied: true, outcome: T.RETRYING, delayMs };
           return;
@@ -536,12 +594,20 @@ export function createEngine({
             },
             { session }
           );
+          await emit(session, "execution.failed", updated._id, { failedTask: task.key, error: message });
           logger.warn(
             { executionId: String(updated._id), taskKey: task.key, outcome, cancelled: cancelled.modifiedCount },
             "execution failed (fail-fast)"
           );
         }
 
+        await emit(session, outcome === T.DEAD_LETTER ? "task.dead_lettered" : "task.failed", task.executionId, {
+          taskId: String(task._id),
+          key: task.key,
+          attempt: task.attempt,
+          error: message,
+          retryable,
+        });
         result = { applied: true, outcome };
       });
 

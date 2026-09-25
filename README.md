@@ -37,6 +37,9 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
 - **Retries**: transient vs non-retryable errors, exponential backoff with full jitter, dead-lettering when
   attempts run out, and a poison-pill guard
 - **Idempotent runs**: an `Idempotency-Key` header makes retried `POST /workflows/:id/run` calls return the same run
+- **Heartbeats + worker registry** (`GET /workers`), **pause/resume/cancel** (`POST /executions/:id/pause|resume|cancel`)
+- **Kafka lifecycle events** via a transactional outbox, with an idempotent analytics consumer (`npm run consumer:analytics`),
+  see [docs/kafka.md](docs/kafka.md)
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)
 
@@ -93,6 +96,7 @@ other local projects using the default ports.
 | `npm run dev` | Start API with auto-reload |
 | `npm start` | Start API |
 | `npm run worker` / `dev:worker` | Start a worker process (run several to scale out) |
+| `npm run consumer:analytics` | Kafka consumer that aggregates lifecycle events |
 | `npm test` | Unit tests (no Docker needed) |
 | `npm run test:integration` | Integration tests against real Mongo/Redis (`infra:up` first) |
 | `npm run test:all` | Both |

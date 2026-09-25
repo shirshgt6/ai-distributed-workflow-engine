@@ -15,6 +15,7 @@ import { TaskExecution } from "./models/taskExecution.model.js";
 import { createEngine } from "./workflow/engine.js";
 import { createTaskQueue } from "./queues/taskQueue.js";
 import { Worker } from "./models/worker.model.js";
+import { OutboxEvent } from "./models/outboxEvent.model.js";
 import { listWorkers } from "./workers/registry.js";
 import { createExecutionService } from "./services/execution.service.js";
 
@@ -42,7 +43,7 @@ async function main() {
   // Redis only holds "which task id to pick up next".
   const queue = createTaskQueue(redis);
   const engine = createEngine({
-    models: { WorkflowExecution, Task, TaskExecution },
+    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent },
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
