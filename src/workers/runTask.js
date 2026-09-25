@@ -9,14 +9,16 @@ import { NonRetryableError } from "./retry.js";
  *   engine: { completeTask: Function, failTask: Function },
  *   handlers: Record<string, Function>,
  *   logger: import('pino').Logger,
+ *   signal?: AbortSignal,   // fired by the worker when the lease is lost (takeover / cancel)
  * }} deps
  */
-export async function runTask({ claimed, engine, handlers, logger }) {
+export async function runTask({ claimed, engine, handlers, logger, signal }) {
   const { task, input, parents } = claimed;
   const taskId = task._id;
   const log = logger.child({ executionId: String(task.executionId), taskKey: task.key, attempt: task.attempt });
   const handler = handlers[task.type];
   const controller = new AbortController();
+  if (signal) signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
 
   // Run the handler. Its result is reported OUTSIDE this try/catch: if
   // reporting itself fails (e.g. Mongo down), that must not be mistaken for

@@ -14,6 +14,8 @@ import { Task } from "./models/task.model.js";
 import { TaskExecution } from "./models/taskExecution.model.js";
 import { createEngine } from "./workflow/engine.js";
 import { createTaskQueue } from "./queues/taskQueue.js";
+import { Worker } from "./models/worker.model.js";
+import { listWorkers } from "./workers/registry.js";
 import { createExecutionService } from "./services/execution.service.js";
 
 // Composition root: the ONE place that reads config, creates real
@@ -44,7 +46,7 @@ async function main() {
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
-    leaseGraceMs: config.worker.leaseGraceMs,
+    leaseMs: config.worker.leaseMs,
   });
   const executionService = createExecutionService({ Workflow, WorkflowExecution, Task, engine });
 
@@ -65,6 +67,7 @@ async function main() {
     auth: { authService, tokens },
     workflowService,
     executionService,
+    admin: { listWorkers: () => listWorkers({ Worker, redis }) },
   });
 
   const server = app.listen(config.port, () => {

@@ -56,6 +56,7 @@ async function runAndWait(token, workflowId, input = {}) {
   });
 }
 
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 const byKey = (tasks) => Object.fromEntries(tasks.map((t) => [t.key, t]));
 
 test("diamond runs end to end: B and C overlap in time, D runs after both, data flows", async () => {
@@ -195,6 +196,53 @@ test("editing the workflow does not change a run already created (snapshot)", as
   });
   expect(done.execution.workflowVersion).toBe(1);
   expect(done.tasks.map((t) => t.key)).toEqual(["A"]);
+});
+
+describe("pause / resume / cancel over HTTP", () => {
+  test("cancel a running execution: 200, tasks cancelled, a second cancel is 409", async () => {
+    const wf = await createWorkflow(alice.token, [
+      { key: "slow", type: "delay", config: { ms: 3000 } },
+      { key: "after", type: "noop", dependsOn: ["slow"] },
+    ]);
+    const run = await as(app, alice.token).post(`/workflows/${wf.id}/run`).send({});
+    const id = run.body.execution.id;
+    await waitFor(async () => (await Task.findOne({ executionId: id, key: "slow" }))?.status === "RUNNING");
+
+    const res = await as(app, alice.token).post(`/executions/${id}/cancel`).send({});
+    expect(res.status).toBe(200);
+    expect(res.body.execution.status).toBe("CANCELLED");
+    const tasks = (await as(app, alice.token).get(`/executions/${id}`)).body.tasks;
+    expect(tasks.map((t) => t.status)).toEqual(["CANCELLED", "CANCELLED"]);
+
+    const again = await as(app, alice.token).post(`/executions/${id}/cancel`).send({});
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe("INVALID_STATE");
+  });
+
+  test("pause then resume over HTTP", async () => {
+    const wf = await createWorkflow(alice.token, [
+      { key: "a", type: "delay", config: { ms: 200 } },
+      { key: "b", type: "noop", dependsOn: ["a"] },
+    ]);
+    const id = (await as(app, alice.token).post(`/workflows/${wf.id}/run`).send({})).body.execution.id;
+    expect((await as(app, alice.token).post(`/executions/${id}/pause`).send({})).body.execution.status).toBe("PAUSED");
+    await sleepMs(400);
+    const paused = (await as(app, alice.token).get(`/executions/${id}`)).body;
+    expect(paused.tasks.map((t) => t.status)).toEqual(["COMPLETED", "PENDING"]); // b not started while paused
+    expect((await as(app, alice.token).post(`/executions/${id}/resume`).send({})).status).toBe(200);
+    const done = await waitFor(async () => {
+      const body = (await as(app, alice.token).get(`/executions/${id}`)).body;
+      return body.execution.status === "COMPLETED" ? body : null;
+    });
+    expect(done.tasks.map((t) => t.status)).toEqual(["COMPLETED", "COMPLETED"]);
+  });
+
+  test("another operator cannot cancel someone else's run (404); viewer cannot (403)", async () => {
+    const wf = await createWorkflow(alice.token, [{ key: "a", type: "delay", config: { ms: 500 } }]);
+    const id = (await as(app, alice.token).post(`/workflows/${wf.id}/run`).send({})).body.execution.id;
+    expect((await as(app, bob.token).post(`/executions/${id}/cancel`).send({})).status).toBe(404);
+    expect((await as(app, victor.token).post(`/executions/${id}/cancel`).send({})).status).toBe(403);
+  });
 });
 
 describe("authorization", () => {

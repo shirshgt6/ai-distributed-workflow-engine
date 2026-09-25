@@ -159,7 +159,7 @@ Timeouts (`withTimeout` plus an `AbortSignal` passed to the handler) are failure
   READY older than `RECONCILE_STALE_MS` → dispatch (crash between commit and dispatch); QUEUED older than that
   → enqueue again (Redis was down or lost data; enqueue is idempotent); RUNNING with an expired lease → enqueue
   for takeover.
-- **Worker crash (Phase 6):** the MongoDB lease (`timeoutMs + LEASE_GRACE_MS`) expires, and the next claim takes
+- **Worker crash (Phase 6; lease renewed by heartbeat since Phase 10):** the MongoDB lease (`LEASE_TTL_MS`, renewed every TTL/3 while the handler runs) expires, and the next claim takes
   the task over as a new attempt with a new `leaseToken`. The old attempt is marked ABANDONED, and its late
   report is fenced.
 - **Redis down at dispatch:** the run still returns 202. The task stays QUEUED in MongoDB and the reconciler

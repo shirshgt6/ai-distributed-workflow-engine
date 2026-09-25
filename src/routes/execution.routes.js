@@ -34,5 +34,16 @@ export function createExecutionRouter({ executionService, authenticate }) {
     c.get
   );
 
+  // Controlling a run is the same capability as starting one.
+  for (const action of ["pause", "resume", "cancel"]) {
+    router.post(
+      `/executions/:id/${action}`,
+      authenticate,
+      requirePermission(PERMISSIONS.WORKFLOW_RUN),
+      validate(executionIdSchema),
+      c.control
+    );
+  }
+
   return router;
 }

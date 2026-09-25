@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { validateDag } from "./dag.js";
 import { assertTransition, EXECUTION_STATUS as E, TASK_STATUS as T } from "./states.js";
-import { claimTask, transitionTask } from "../repositories/task.repository.js";
+import { claimTask, renewTaskLease, transitionTask } from "../repositories/task.repository.js";
 import { ATTEMPT_STATUS } from "../models/taskExecution.model.js";
 import { ValidationError } from "../utils/errors.js";
 import { computeBackoff, isRetryable } from "../workers/retry.js";
@@ -27,19 +27,20 @@ import { computeBackoff, isRetryable } from "../workers/retry.js";
  *   enqueue: (item: { taskId: string, executionId: string, key: string }) => void | Promise<void>,
  *   enqueueDelayed?: (item: { taskId: string }, delayMs: number) => void | Promise<void>,
  *   logger: import('pino').Logger,
- *   leaseGraceMs?: number,
+ *   leaseMs?: number,
  *   backoff?: (attempt: number, baseDelayMs: number) => number,
  *   connection?: import('mongoose').Connection,
  * }} deps
- *   leaseGraceMs: extra time on top of a task's timeoutMs before its lease
- *   expires and another worker may take it over.
+ *   leaseMs: how long a claim is valid without a heartbeat. Workers renew it
+ *   while the handler runs; if they stop (crash), another worker may take the
+ *   task over once it lapses.
  */
 export function createEngine({
   models,
   enqueue,
   enqueueDelayed,
   logger,
-  leaseGraceMs = 10_000,
+  leaseMs = 15_000,
   backoff = computeBackoff,
   connection = mongoose.connection,
 }) {
@@ -55,6 +56,9 @@ export function createEngine({
    * same task twice: only the caller whose transition succeeded enqueues it.
    */
   async function dispatchReady(executionId) {
+    // A PAUSED (or finished) run dispatches nothing new; resume dispatches later.
+    const execution = await WorkflowExecution.findById(executionId).select("status");
+    if (execution?.status !== E.RUNNING) return;
     const ready = await Task.find({ executionId, status: T.READY }).select("_id key executionId");
     for (const task of ready) {
       await dispatchTask(task);
@@ -100,6 +104,92 @@ export function createEngine({
 
   const engine = {
     dispatchReady,
+
+    /** Heartbeat for a running task. false = lease lost; stop working on it. */
+    renewLease(taskId, leaseToken) {
+      return renewTaskLease(taskId, leaseToken, leaseMs);
+    },
+
+    /**
+     * PAUSE: stop scheduling new tasks. Tasks already queued or running finish;
+     * children whose dependencies complete stay PENDING until resume.
+     * @returns {Promise<boolean>} false = the run wasn't RUNNING
+     */
+    async pauseExecution(executionId) {
+      assertTransition("execution", E.RUNNING, E.PAUSED);
+      const r = await WorkflowExecution.updateOne({ _id: executionId, status: E.RUNNING }, { $set: { status: E.PAUSED } });
+      return r.modifiedCount === 1;
+    },
+
+    /**
+     * RESUME: PAUSED -> RUNNING, promote children that became ready while
+     * paused, complete the run if everything already finished, then dispatch.
+     * @returns {Promise<boolean>} false = the run wasn't PAUSED
+     */
+    async resumeExecution(executionId) {
+      let resumed = false;
+      await connection.transaction(async (session) => {
+        resumed = false;
+        assertTransition("execution", E.PAUSED, E.RUNNING);
+        const execution = await WorkflowExecution.findOneAndUpdate(
+          { _id: executionId, status: E.PAUSED },
+          { $set: { status: E.RUNNING } },
+          { returnDocument: "after", session }
+        );
+        if (!execution) return;
+        await Task.updateMany(
+          { executionId, status: T.PENDING, remainingDeps: 0 },
+          { $set: { status: T.READY, readyAt: now() } },
+          { session }
+        );
+        if (execution.pendingTasks === 0) {
+          await WorkflowExecution.updateOne(
+            { _id: executionId, status: E.RUNNING },
+            { $set: { status: E.COMPLETED, completedAt: now() } },
+            { session }
+          );
+        }
+        resumed = true;
+      });
+      if (resumed) await dispatchReady(executionId);
+      return resumed;
+    },
+
+    /**
+     * CANCEL: every unfinished task -> CANCELLED (including RUNNING ones), and
+     * the run -> CANCELLED. A worker running a cancelled task finds out at its
+     * next lease renewal (the renewal no longer matches), aborts the handler,
+     * and its late report is rejected by the CAS. Cooperative cancellation.
+     * @returns {Promise<boolean>} false = the run was already finished
+     */
+    async cancelExecution(executionId) {
+      let cancelled = false;
+      await connection.transaction(async (session) => {
+        cancelled = false;
+        const execution = await WorkflowExecution.findOne(
+          { _id: executionId, status: { $in: [E.RUNNING, E.PAUSED] } },
+          null,
+          { session }
+        );
+        if (!execution) return;
+        assertTransition("execution", execution.status, E.CANCELLED);
+        const r = await Task.updateMany(
+          {
+            executionId,
+            status: { $in: [T.PENDING, T.READY, T.QUEUED, T.RETRYING, T.RUNNING, T.WAITING_FOR_APPROVAL] },
+          },
+          { $set: { status: T.CANCELLED, completedAt: now(), leaseOwner: null, leaseExpiresAt: null } },
+          { session }
+        );
+        await WorkflowExecution.updateOne(
+          { _id: executionId, status: execution.status },
+          { $set: { status: E.CANCELLED, completedAt: now(), error: "Cancelled by user" }, $inc: { pendingTasks: -r.modifiedCount } },
+          { session }
+        );
+        cancelled = true;
+      });
+      return cancelled;
+    },
 
     /**
      * Start a run of a workflow definition.
@@ -197,7 +287,7 @@ export function createEngine({
      *   (finished, cancelled, or running elsewhere under a live lease)
      */
     async startTask(taskId, workerId) {
-      const task = await claimTask(taskId, workerId, { leaseGraceMs });
+      const task = await claimTask(taskId, workerId, { leaseMs });
       if (!task) return null;
 
       // If this was a TAKEOVER, the previous attempt's record is still RUNNING:
@@ -300,18 +390,23 @@ export function createEngine({
           { returnDocument: "after", session }
         );
 
-        if (execution.status === E.RUNNING && task.dependents.length > 0) {
+        const live = execution.status === E.RUNNING || execution.status === E.PAUSED;
+        if (live && task.dependents.length > 0) {
           await Task.updateMany(
             { executionId: task.executionId, key: { $in: task.dependents } },
             { $inc: { remainingDeps: -1 } },
             { session }
           );
-          assertTransition("task", T.PENDING, T.READY);
-          await Task.updateMany(
-            { executionId: task.executionId, key: { $in: task.dependents }, status: T.PENDING, remainingDeps: 0 },
-            { $set: { status: T.READY, readyAt: finishedAt } },
-            { session }
-          );
+          // While PAUSED, children keep remainingDeps 0 but stay PENDING;
+          // resumeExecution promotes them.
+          if (execution.status === E.RUNNING) {
+            assertTransition("task", T.PENDING, T.READY);
+            await Task.updateMany(
+              { executionId: task.executionId, key: { $in: task.dependents }, status: T.PENDING, remainingDeps: 0 },
+              { $set: { status: T.READY, readyAt: finishedAt } },
+              { session }
+            );
+          }
         }
 
         if (execution.status === E.RUNNING && execution.pendingTasks === 0) {
@@ -385,7 +480,8 @@ export function createEngine({
         const attemptsLeft = task.attempt < task.maxAttempts;
 
         // ---- RETRY --------------------------------------------------------
-        if (retryable && attemptsLeft && execution.status === E.RUNNING) {
+        const live = execution.status === E.RUNNING || execution.status === E.PAUSED;
+        if (retryable && attemptsLeft && live) {
           const delayMs = backoff(task.attempt, task.baseDelayMs);
           const won = await transitionTask(taskId, T.RUNNING, T.RETRYING, {
             where: { leaseToken },
@@ -421,7 +517,7 @@ export function createEngine({
           { returnDocument: "after", session }
         );
 
-        if (updated.status === E.RUNNING) {
+        if (updated.status === E.RUNNING || updated.status === E.PAUSED) {
           const cancelled = await Task.updateMany(
             { executionId: task.executionId, status: { $in: [T.PENDING, T.READY, T.QUEUED, T.RETRYING] } },
             { $set: { status: T.CANCELLED, completedAt: finishedAt } },
@@ -431,9 +527,9 @@ export function createEngine({
             outcome === T.DEAD_LETTER
               ? `failed after ${task.attempt} attempt(s) and was dead-lettered`
               : "failed";
-          assertTransition("execution", E.RUNNING, E.FAILED);
+          assertTransition("execution", updated.status, E.FAILED);
           await WorkflowExecution.updateOne(
-            { _id: updated._id, status: E.RUNNING },
+            { _id: updated._id, status: updated.status },
             {
               $set: { status: E.FAILED, error: `Task "${task.key}" ${why}: ${message}`, completedAt: finishedAt },
               $inc: { pendingTasks: -cancelled.modifiedCount },
@@ -485,7 +581,13 @@ export function createEngine({
       const stuckReady = await Task.find({ status: T.READY, readyAt: { $lt: cutoff } })
         .select("_id key executionId")
         .limit(limit);
+      // Only the stuck tasks themselves, and only for runs still RUNNING
+      // (a PAUSED run's READY tasks wait for resume).
+      const statusOf = new Map();
       for (const task of stuckReady) {
+        const id = String(task.executionId);
+        if (!statusOf.has(id)) statusOf.set(id, (await WorkflowExecution.findById(id).select("status"))?.status);
+        if (statusOf.get(id) !== E.RUNNING) continue;
         if (await dispatchTask(task)) counts.ready += 1;
       }
 

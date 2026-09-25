@@ -50,8 +50,9 @@ export async function transitionTask(taskId, from, to, { set = {}, inc, where = 
  *
  * Lease maths uses MongoDB's clock ($$NOW), not this process's clock, so
  * workers with skewed clocks agree on whether a lease has expired.
- * leaseExpiresAt = now + task.timeoutMs + leaseGraceMs: a healthy worker's
- * handler is stopped by its timeout well before the lease runs out.
+ * leaseExpiresAt = now + leaseMs. The worker RENEWS it (heartbeat) while the
+ * handler runs, so the lease can be short (fast crash detection) even for
+ * long tasks. See renewTaskLease.
  *
  * Returns the updated task (carrying the NEW leaseToken the worker must
  * present when reporting), or null: already running elsewhere with a live
@@ -59,9 +60,9 @@ export async function transitionTask(taskId, from, to, { set = {}, inc, where = 
  *
  * @param {import('mongoose').Types.ObjectId|string} taskId
  * @param {string} workerId
- * @param {{ leaseGraceMs: number }} options
+ * @param {{ leaseMs: number }} options
  */
-export async function claimTask(taskId, workerId, { leaseGraceMs }) {
+export async function claimTask(taskId, workerId, { leaseMs }) {
   assertTransition("task", TASK_STATUS.QUEUED, TASK_STATUS.RUNNING);
   assertTransition("task", TASK_STATUS.RUNNING, TASK_STATUS.QUEUED); // takeover path
   assertTransition("task", TASK_STATUS.RETRYING, TASK_STATUS.QUEUED); // retry path
@@ -84,10 +85,29 @@ export async function claimTask(taskId, workerId, { leaseGraceMs }) {
           startedAt: "$$NOW",
           attempt: { $add: ["$attempt", 1] },
           leaseToken: { $add: ["$leaseToken", 1] },
-          leaseExpiresAt: { $add: ["$$NOW", { $add: ["$timeoutMs", leaseGraceMs] }] },
+          leaseExpiresAt: { $add: ["$$NOW", leaseMs] },
         },
       },
     ],
     { returnDocument: "after", updatePipeline: true }
   );
+}
+
+/**
+ * HEARTBEAT for one running task: push its lease out by leaseMs, but only if
+ * this worker still owns it (status RUNNING + same fencing token).
+ *
+ * false means the task was taken away: its lease expired and another worker
+ * took over, or the execution was cancelled. The caller must stop working
+ * on it (abort the handler); any report it sends later would be fenced anyway.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function renewTaskLease(taskId, leaseToken, leaseMs) {
+  const result = await Task.updateOne(
+    { _id: taskId, status: TASK_STATUS.RUNNING, leaseToken },
+    [{ $set: { leaseExpiresAt: { $add: ["$$NOW", leaseMs] } } }],
+    { updatePipeline: true }
+  );
+  return result.matchedCount === 1;
 }

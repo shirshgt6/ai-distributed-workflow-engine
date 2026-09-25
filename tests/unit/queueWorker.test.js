@@ -49,6 +49,9 @@ function fakeEngine(taskFor, log = []) {
     async completeTask(args) {
       log.push(["complete", String(args.taskId), args.output]);
     },
+    async renewLease() {
+      return true;
+    },
     async failTask(args) {
       log.push(["fail", String(args.taskId), args.error.message, args.error.name]);
     },
@@ -72,14 +75,14 @@ function makeWorker(queue, engine, extra = {}) {
     workerId: "w1",
     concurrency: 2,
     pollIntervalMs: 5,
-    leaseGraceMs: 500,
+    leaseMs: 1500,
     maintenanceIntervalMs: 1000,
     ...extra,
   });
 }
 
 describe("queue worker", () => {
-  test("claim -> extend lease to timeout+grace -> run -> report to MongoDB -> ack LAST", async () => {
+  test("claim -> extend lease -> run -> report to MongoDB -> ack LAST", async () => {
     const queue = fakeQueue(["t1"]);
     const events = [];
     const engine = fakeEngine(() => ({ type: "echo", config: { x: 1 } }), events);
@@ -94,7 +97,7 @@ describe("queue worker", () => {
     await waitFor(() => events.some((e) => e[0] === "ack"));
     await worker.stop();
 
-    expect(queue.log.find((e) => e[0] === "extend")).toEqual(["extend", "t1", 1000 + 500]);
+    expect(queue.log.find((e) => e[0] === "extend")).toEqual(["extend", "t1", 1500]);
     // The result must be stored BEFORE the queue forgets the task.
     expect(events.map((e) => e[0])).toEqual(["complete", "ack"]);
     expect(events[0][2]).toEqual({ config: { x: 1 }, input: {}, parents: {} });
@@ -162,6 +165,28 @@ describe("queue worker", () => {
     await waitFor(() => engine.log.length === 10);
     await worker.stop();
     expect(maxActive).toBe(3);
+  });
+
+  test("lease lost mid-task (cancel/takeover): the handler is ABORTED and its report goes nowhere useful", async () => {
+    const queue = fakeQueue(["t1"]);
+    let aborted = null;
+    const handlers = {
+      long: async ({ signal }) => {
+        try {
+          await sleep(5000, signal);
+        } catch (err) {
+          aborted = err.message;
+          throw err;
+        }
+      },
+    };
+    const engine = fakeEngine(() => ({ type: "long", timeoutMs: 10_000 }));
+    engine.renewLease = async () => false; // MongoDB says: not yours any more
+    const worker = makeWorker(queue, engine, { handlers, concurrency: 1, leaseMs: 90 });
+    worker.start();
+    await waitFor(() => aborted !== null);
+    await worker.stop();
+    expect(aborted).toMatch(/Lease lost/);
   });
 
   test("stop() lets the in-flight task finish and report", async () => {

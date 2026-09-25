@@ -30,6 +30,12 @@ export function createExecutionController(executionService) {
       res.status(202).location(`/executions/${execution._id}`).json({ execution });
     },
 
+    async control(req, res) {
+      const action = req.path.split("/").pop(); // pause | resume | cancel
+      const execution = await executionService.control(req.user, req.valid.params.id, action);
+      res.status(200).json({ execution });
+    },
+
     async get(req, res) {
       const { execution, tasks } = await executionService.get(req.user, req.valid.params.id);
       res.status(200).json({ execution, tasks });

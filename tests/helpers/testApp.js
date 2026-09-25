@@ -17,6 +17,8 @@ import { createEngine } from "../../src/workflow/engine.js";
 import { createRedisClient } from "../../src/config/redis.js";
 import { createTaskQueue } from "../../src/queues/taskQueue.js";
 import { createQueueWorker } from "../../src/workers/queueWorker.js";
+import { createWorkerRegistry, listWorkers } from "../../src/workers/registry.js";
+import { Worker } from "../../src/models/worker.model.js";
 import { createExecutionService } from "../../src/services/execution.service.js";
 import { handlers } from "../../src/handlers/index.js";
 
@@ -45,7 +47,7 @@ export function createTestApp() {
  * worker, for end-to-end tests. `await stack.start()` in beforeAll and
  * `await stack.stop()` in afterAll.
  */
-export function createTestStack({ concurrency = 4, leaseGraceMs = 2000, workerId = "test-worker" } = {}) {
+export function createTestStack({ concurrency = 4, leaseMs = 2000, workerId = "test-worker", withRegistry = false } = {}) {
   const redis = createRedisClient(REDIS_URL, logger, { name: "test-stack" });
   const queue = createTaskQueue(redis, { prefix: `test:${randomUUID()}` });
   const authService = createAuthService({ User, tokens, bcryptCost: BCRYPT_COST });
@@ -55,7 +57,7 @@ export function createTestStack({ concurrency = 4, leaseGraceMs = 2000, workerId
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
-    leaseGraceMs,
+    leaseMs,
     backoff: (attempt) => 20 * attempt, // fast, deterministic retries in tests
   });
   const worker = createQueueWorker({
@@ -66,11 +68,20 @@ export function createTestStack({ concurrency = 4, leaseGraceMs = 2000, workerId
     workerId,
     concurrency,
     pollIntervalMs: 20,
-    leaseGraceMs,
+    leaseMs,
     maintenanceIntervalMs: 50,
+    registry: withRegistry
+      ? createWorkerRegistry({ Worker, redis, workerId, host: "test-host", pid: process.pid, concurrency, ttlMs: leaseMs, logger })
+      : null,
   });
   const executionService = createExecutionService({ Workflow, WorkflowExecution, Task, engine });
-  const app = createApp({ logger, auth: { authService, tokens }, workflowService, executionService });
+  const app = createApp({
+    logger,
+    auth: { authService, tokens },
+    workflowService,
+    executionService,
+    admin: { listWorkers: () => listWorkers({ Worker, redis }) },
+  });
 
   return {
     app,
@@ -81,7 +92,7 @@ export function createTestStack({ concurrency = 4, leaseGraceMs = 2000, workerId
     /** @param {{ startWorker?: boolean }} [options] false = connect only (tests start the worker later) */
     async start({ startWorker = true } = {}) {
       await redis.connect();
-      if (startWorker) worker.start();
+      if (startWorker) await worker.start();
     },
     async stop() {
       await worker.stop();

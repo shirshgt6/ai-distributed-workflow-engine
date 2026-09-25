@@ -41,7 +41,8 @@ const T = TASK_STATUS;
 const EXECUTION_TRANSITIONS = Object.freeze({
   [E.PENDING]: [E.RUNNING, E.CANCELLED],
   [E.RUNNING]: [E.PAUSED, E.WAITING_FOR_APPROVAL, E.COMPLETED, E.FAILED, E.CANCELLED],
-  [E.PAUSED]: [E.RUNNING, E.CANCELLED],
+  // A task can fail for good while paused (tasks already running finish).
+  [E.PAUSED]: [E.RUNNING, E.FAILED, E.CANCELLED],
   [E.WAITING_FOR_APPROVAL]: [E.RUNNING, E.FAILED, E.CANCELLED],
   [E.COMPLETED]: [],
   [E.FAILED]: [],
