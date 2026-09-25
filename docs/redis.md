@@ -87,8 +87,11 @@ The reconciler (`engine.reconcile`, every `RECONCILE_INTERVAL_MS`) treats MongoD
 | 50 concurrent claims on 20 tasks | each claimed exactly once | `taskQueue.test.js` |
 
 ## Known limitations
-- **No heartbeat yet.** The lease is fixed at `timeoutMs + grace`, so a very long task needs a long lease, and a dead
-  worker is only noticed when that lease ends. Phase 10 adds heartbeats (short leases, renewed while alive).
+- **Heartbeats (Phase 10):** the running lease is a short `LEASE_TTL_MS`, renewed every TTL/3 in both MongoDB (fenced
+  by `leaseToken`) and Redis while the handler runs. A dead worker is noticed within one TTL, even for long tasks.
+- **Lock (`src/queues/lock.js`):** `SET NX PX` with a random token, compare-and-delete release, and an INCR fencing
+  counter. This is a single-node lock, not Redlock. A holder paused past the TTL can still act, so callers must
+  tolerate a rare double holder (the scheduler does, through idempotency keys).
 - **Horizontal scaling (smoke-tested):** 3 worker processes × concurrency 2 ran six 1-second tasks of one run in
   about 1.2 s of wall-clock time, on one laptop, with each worker taking 2. That's a local sanity check, not a benchmark.
 - **Single Redis node.** No replication or failover. The reconciler limits the damage of data loss, but not downtime.

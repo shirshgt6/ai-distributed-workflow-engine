@@ -38,8 +38,9 @@ import { sleep } from "../handlers/index.js";
  *   concurrency?: number,
  *   pollIntervalMs?: number,
  *   claimLeaseMs?: number,     // Redis lease covering "popped but not yet claimed in MongoDB"
- *   leaseGraceMs?: number,     // added to task.timeoutMs for the running lease
+ *   leaseMs?: number,          // running lease; renewed every leaseMs/3 while the handler runs
  *   maintenanceIntervalMs?: number,
+ *   registry?: ReturnType<import('./registry.js').createWorkerRegistry>, // heartbeat / GET /workers
  * }} deps
  */
 export function createQueueWorker({
@@ -51,14 +52,17 @@ export function createQueueWorker({
   concurrency = 4,
   pollIntervalMs = 200,
   claimLeaseMs = 30_000,
-  leaseGraceMs = 10_000,
+  leaseMs = 15_000,
   maintenanceIntervalMs = 1000,
+  registry = null,
 }) {
   const log = logger.child({ workerId });
   let stopping = false;
   let loops = [];
   let maintenanceTimer = null;
+  let heartbeatTimer = null;
   let running = 0;
+  let completedSinceLastBeat = 0;
 
   async function processTask(taskId) {
     const claimed = await engine.startTask(taskId, workerId);
@@ -68,9 +72,33 @@ export function createQueueWorker({
       await queue.ack(taskId);
       return;
     }
-    await queue.extendLease(taskId, claimed.task.timeoutMs + leaseGraceMs);
-    await runTask({ claimed, engine, handlers, logger: log });
+    await queue.extendLease(taskId, leaseMs);
+
+    // LEASE RENEWAL (per-task heartbeat): every leaseMs/3, push both leases
+    // out. If MongoDB says we no longer own the task (takeover or cancel),
+    // abort the handler instead of finishing work nobody will accept.
+    const leaseLost = new AbortController();
+    const renew = setInterval(async () => {
+      try {
+        const stillOurs = await engine.renewLease(claimed.task._id, claimed.task.leaseToken);
+        if (!stillOurs) {
+          log.warn({ taskKey: claimed.task.key }, "lease lost (cancelled or taken over); aborting handler");
+          leaseLost.abort(new Error("Lease lost: task cancelled or taken over"));
+          return;
+        }
+        await queue.extendLease(taskId, leaseMs);
+      } catch (err) {
+        log.warn({ err: err.message }, "lease renewal failed");
+      }
+    }, Math.max(50, Math.floor(leaseMs / 3)));
+
+    try {
+      await runTask({ claimed, engine, handlers, logger: log, signal: leaseLost.signal });
+    } finally {
+      clearInterval(renew);
+    }
     await queue.ack(taskId);
+    completedSinceLastBeat += 1;
   }
 
   async function loop() {
@@ -114,11 +142,20 @@ export function createQueueWorker({
     }
   }
 
+  async function heartbeat() {
+    if (!registry) return;
+    const done = completedSinceLastBeat;
+    completedSinceLastBeat = 0;
+    await registry.beat({ runningTasks: running, completedSinceLastBeat: done });
+  }
+
   return {
-    start() {
+    async start() {
       stopping = false;
+      if (registry) await registry.register();
       loops = Array.from({ length: concurrency }, () => loop());
       maintenanceTimer = setInterval(maintenance, maintenanceIntervalMs);
+      heartbeatTimer = setInterval(heartbeat, Math.max(50, Math.floor(leaseMs / 3)));
       log.info({ concurrency }, "queue worker started");
     },
 
@@ -129,7 +166,9 @@ export function createQueueWorker({
     async stop() {
       stopping = true;
       clearInterval(maintenanceTimer);
+      clearInterval(heartbeatTimer);
       await Promise.allSettled(loops);
+      if (registry) await registry.deregister();
       log.info("queue worker stopped");
     },
 

@@ -12,8 +12,8 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 6 | Redis task scheduling | ✅ |
 | 7 | Distributed workers | ✅ |
 | 8 | Concurrency + retries + backoff | ✅ |
-| 9 | Idempotency + distributed locks | 🟡 idempotent run creation only; no distributed locks |
-| 10 | Worker heartbeat + crash recovery | ⬜ |
+| 9 | Idempotency + distributed locks | ✅ |
+| 10 | Worker heartbeat + crash recovery | ✅ |
 | 11 | Kafka event architecture (transactional outbox) | ⬜ |
 | 12 | Scheduled workflows | ⬜ |
 | 13 | LLM provider abstraction | ⬜ |
@@ -222,3 +222,16 @@ SIGTERM to a busy worker let its task finish before it exited.
 
 **Not built** (do not claim): distributed locks, pause/resume/cancel endpoints, heartbeats and a worker registry,
 Kafka, scheduled workflows, and the whole AI layer (Phases 11–23), plus Docker images for the app and Swagger.
+
+## Phases 9–10 — Distributed lock, heartbeats, worker registry, pause/resume/cancel ✅
+
+**Implemented**: `src/queues/lock.js` (SET NX PX + random token, compare-and-delete release, compare-and-extend,
+INCR fencing counter). Short running lease `LEASE_TTL_MS` renewed every TTL/3 by the worker (`renewTaskLease`, fenced by
+leaseToken); losing it aborts the handler. Worker registry (`Worker` model + Redis TTL key) and `GET /workers` (admin).
+Engine `pauseExecution` / `resumeExecution` / `cancelExecution` with `POST /executions/:id/pause|resume|cancel`
+(409 `INVALID_STATE` from the wrong state). Cancel marks RUNNING tasks CANCELLED too, and workers notice at their next
+renewal (cooperative cancel).
+**Tests**: 241 total, including lock races and stale-holder tests, heartbeat keeping a slow task, takeover making renewal
+fail, pause/resume semantics, cancel vs completion race (5 rounds), and HTTP cancel/pause/resume/authorization.
+**Mutation check**: lock release without the token check, and cancel skipping RUNNING tasks, were both caught.
+**Not built**: Redlock or multi-node locking (single Redis, by design); the lock is used by the scheduler (Phase 12).

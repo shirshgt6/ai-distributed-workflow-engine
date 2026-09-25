@@ -66,6 +66,22 @@ export function createExecutionService({ Workflow, WorkflowExecution, Task, engi
       }
     },
 
+    /** pause | resume | cancel an execution the user owns. */
+    async control(user, executionId, action) {
+      const execution = await WorkflowExecution.findOne({ _id: executionId, ...ownerScope(user) }).select("_id status");
+      if (!execution) throw new NotFoundError("Execution not found");
+      const op = { pause: engine.pauseExecution, resume: engine.resumeExecution, cancel: engine.cancelExecution }[action];
+      const changed = await op(execution._id);
+      if (!changed) {
+        throw new AppError(`Cannot ${action} an execution that is ${execution.status}`, {
+          statusCode: 409,
+          code: "INVALID_STATE",
+          details: { status: execution.status },
+        });
+      }
+      return WorkflowExecution.findById(execution._id);
+    },
+
     async get(user, executionId) {
       const execution = await WorkflowExecution.findOne({ _id: executionId, ...ownerScope(user) });
       if (!execution) throw new NotFoundError("Execution not found");

@@ -38,9 +38,9 @@ const envSchema = z.object({
   // Redis lease right after popping a task, covering "popped but not yet
   // claimed in MongoDB". If the worker dies in that gap, the id comes back.
   QUEUE_CLAIM_LEASE_MS: z.coerce.number().int().min(1000).default(30_000),
-  // Running lease = task.timeoutMs + this grace. After that, another worker
-  // may take the task over.
-  LEASE_GRACE_MS: z.coerce.number().int().min(100).default(10_000),
+  // Running-task lease. Workers renew it every LEASE_TTL_MS/3 (heartbeat); a
+  // worker that stops renewing (crashed) loses the task after at most this long.
+  LEASE_TTL_MS: z.coerce.number().int().min(300).default(15_000),
   // Reconciler: how often MongoDB is compared against Redis, and how old a
   // READY/QUEUED task must be before it counts as "stuck".
   RECONCILE_INTERVAL_MS: z.coerce.number().int().min(100).default(5000),
@@ -104,7 +104,7 @@ export function loadConfig(source = process.env) {
       concurrency: env.WORKER_CONCURRENCY,
       pollIntervalMs: env.QUEUE_POLL_INTERVAL_MS,
       claimLeaseMs: env.QUEUE_CLAIM_LEASE_MS,
-      leaseGraceMs: env.LEASE_GRACE_MS,
+      leaseMs: env.LEASE_TTL_MS,
     }),
     reconciler: Object.freeze({ intervalMs: env.RECONCILE_INTERVAL_MS, staleMs: env.RECONCILE_STALE_MS }),
   });

@@ -8,7 +8,7 @@ import { Task } from "../../src/models/task.model.js";
 import { TaskExecution } from "../../src/models/taskExecution.model.js";
 import { MONGO_URI, logger, createTestStack, waitFor } from "../helpers/testApp.js";
 
-const LEASE_GRACE_MS = 100;
+const LEASE_MS = 300;
 let stack;
 
 const ownerId = new mongoose.Types.ObjectId();
@@ -35,7 +35,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await Promise.all([WorkflowExecution.deleteMany({}), Task.deleteMany({}), TaskExecution.deleteMany({})]);
-  stack = createTestStack({ concurrency: 2, leaseGraceMs: LEASE_GRACE_MS, workerId: "healthy-worker" });
+  stack = createTestStack({ concurrency: 2, leaseMs: LEASE_MS, workerId: "healthy-worker" });
   await stack.start({ startWorker: false });
 });
 
@@ -65,14 +65,14 @@ test("worker pops a task from Redis and dies BEFORE recording it in MongoDB (Pro
 test("worker dies in the MIDDLE of a task: the lease expires and another worker takes over", async () => {
   const { engine, queue, worker } = stack;
   const execution = await engine.startExecution({
-    workflow: workflowOf({ key: "A", type: "noop", timeoutMs: 200 }, { key: "B", type: "echo", dependsOn: ["A"] }),
+    workflow: workflowOf({ key: "A", type: "noop" }, { key: "B", type: "echo", dependsOn: ["A"] }),
   });
 
   // The doomed worker does everything a real one does up to running the handler...
   const id = await queue.claim(30_000);
   const claimed = await engine.startTask(id, "doomed-worker");
-  await queue.extendLease(id, claimed.task.timeoutMs + LEASE_GRACE_MS);
-  // ...and then the process is killed. No report, no ack.
+  await queue.extendLease(id, LEASE_MS);
+  // ...and then the process is killed. No report, no ack, NO MORE HEARTBEATS.
 
   worker.start();
   expect(await finalState(execution._id)).toBe("COMPLETED");

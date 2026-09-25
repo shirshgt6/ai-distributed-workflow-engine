@@ -27,7 +27,7 @@ const engine = createEngine({
     delayed.push([t.key, delayMs]);
   },
   logger,
-  leaseGraceMs: 50, // running lease = task.timeoutMs + 50ms (short, for takeover tests)
+  leaseMs: 150, // short running lease, for takeover tests
   backoff: (attempt, baseDelayMs) => baseDelayMs * 2 ** (attempt - 1), // no jitter: deterministic
 });
 
@@ -288,8 +288,8 @@ describe("reconciler (MongoDB is the truth, Redis is made to agree)", () => {
   });
 
   test("RUNNING tasks with an expired lease are re-enqueued for takeover", async () => {
-    const { _id } = await engine.startExecution({ workflow: workflowOf({ ...def("A"), timeoutMs: 100 }) });
-    await start(_id, "A"); // lease = 100 + 50 ms ... and the worker "dies"
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+    await start(_id, "A"); // lease = 150 ms ... and the worker "dies"
     enqueued = [];
     expect((await engine.reconcile({ staleMs: 10_000 })).running).toBe(0); // lease still live
     await sleep(200);
@@ -326,10 +326,28 @@ describe("leases and takeover", () => {
     expect((await engine.completeTask({ taskId: first._id, leaseToken: taken.task.leaseToken })).applied).toBe(true);
   });
 
-  test("the lease deadline is timeoutMs + grace, computed by MongoDB's clock", async () => {
-    const { _id } = await engine.startExecution({ workflow: workflowOf({ ...def("A"), timeoutMs: 1000 }) });
+  test("the lease deadline is now + leaseMs, computed by MongoDB's clock", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
     const a = await start(_id, "A");
-    expect(a.leaseExpiresAt - a.startedAt).toBe(1000 + 50);
+    expect(a.leaseExpiresAt - a.startedAt).toBe(150);
+  });
+
+  test("HEARTBEAT: renewing the lease keeps a slow task from being taken over", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+    const a = await start(_id, "A");
+    for (let i = 0; i < 4; i++) {
+      await sleep(80); // total 320ms > 150ms lease, but renewed every 80ms
+      expect(await engine.renewLease(a._id, a.leaseToken)).toBe(true);
+    }
+    expect(await engine.startTask(a._id, "thief")).toBeNull();
+  });
+
+  test("renewal fails once the task was taken over (so the old worker aborts)", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+    const a = await start(_id, "A");
+    await sleep(200);
+    await engine.startTask(a._id, "w2"); // takeover
+    expect(await engine.renewLease(a._id, a.leaseToken)).toBe(false);
   });
 });
 
@@ -434,5 +452,65 @@ describe("retries, backoff and dead-lettering (Phase 8)", () => {
     const counts = await engine.reconcile({ staleMs: 10_000 });
     expect(counts.retrying).toBe(1);
     expect(enqueued).toEqual(["A"]);
+  });
+});
+
+describe("pause / resume / cancel", () => {
+  test("PAUSE stops new dispatch; children stay PENDING; RESUME promotes and dispatches them", async () => {
+    const { _id } = await engine.startExecution({ workflow: diamond() });
+    const a = await start(_id, "A");
+    expect(await engine.pauseExecution(_id)).toBe(true);
+    enqueued = [];
+    await engine.completeTask({ taskId: a._id, leaseToken: a.leaseToken }); // A finishes while paused
+    expect(enqueued).toEqual([]); // nothing new started
+    expect((await taskByKey(_id, "B")).toObject()).toMatchObject({ status: T.PENDING, remainingDeps: 0 });
+
+    expect(await engine.resumeExecution(_id)).toBe(true);
+    expect(enqueued.sort()).toEqual(["B", "C"]);
+    expect((await WorkflowExecution.findById(_id)).status).toBe(E.RUNNING);
+  });
+
+  test("resume of a run whose tasks all finished while paused completes it", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+    const a = await start(_id, "A");
+    await engine.pauseExecution(_id);
+    await engine.completeTask({ taskId: a._id, leaseToken: a.leaseToken });
+    expect(await executionState(_id)).toEqual({ status: E.PAUSED, pendingTasks: 0 });
+    await engine.resumeExecution(_id);
+    expect(await executionState(_id)).toEqual({ status: E.COMPLETED, pendingTasks: 0 });
+  });
+
+  test("pause/resume only from the right state", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+    expect(await engine.resumeExecution(_id)).toBe(false); // not paused
+    expect(await engine.pauseExecution(_id)).toBe(true);
+    expect(await engine.pauseExecution(_id)).toBe(false); // already paused
+  });
+
+  test("CANCEL: every unfinished task (even RUNNING) is cancelled; the worker's lease renewal and report are rejected", async () => {
+    const { _id } = await engine.startExecution({ workflow: diamond() });
+    const a = await start(_id, "A");
+    expect(await engine.cancelExecution(_id)).toBe(true);
+
+    const tasks = await Task.find({ executionId: _id });
+    expect(tasks.every((t) => t.status === T.CANCELLED)).toBe(true);
+    expect(await executionState(_id)).toEqual({ status: E.CANCELLED, pendingTasks: 0 });
+    expect(await engine.renewLease(a._id, a.leaseToken)).toBe(false); // worker will abort
+    expect((await engine.completeTask({ taskId: a._id, leaseToken: a.leaseToken })).applied).toBe(false);
+    expect(await engine.cancelExecution(_id)).toBe(false); // already finished
+  });
+
+  test("RACE: cancel vs the last task completing -> exactly one outcome, consistent counters", async () => {
+    for (let round = 0; round < 5; round++) {
+      const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) });
+      const a = await start(_id, "A");
+      const [, cancelled] = await Promise.all([
+        engine.completeTask({ taskId: a._id, leaseToken: a.leaseToken }),
+        engine.cancelExecution(_id),
+      ]);
+      const state = await executionState(_id);
+      expect(state.pendingTasks).toBe(0);
+      expect(state.status).toBe(cancelled ? E.CANCELLED : E.COMPLETED);
+    }
   });
 });

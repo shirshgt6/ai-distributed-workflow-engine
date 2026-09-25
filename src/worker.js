@@ -11,14 +11,17 @@ import { createEngine } from "./workflow/engine.js";
 import { createTaskQueue } from "./queues/taskQueue.js";
 import { createQueueWorker } from "./workers/queueWorker.js";
 import { handlers } from "./handlers/index.js";
+import { Worker } from "./models/worker.model.js";
+import { createWorkerRegistry } from "./workers/registry.js";
 
 // WORKER PROCESS ENTRYPOINT:  npm run worker
 //
 // Runs task handlers, separately from the API. Start as many as you like (on
 // one machine or many): they coordinate only through Redis (who takes which
-// task) and MongoDB (task state). There is no leader and no registration
-// step. That is what "horizontal scaling" means here: more load, more
-// worker processes, no code change.
+// task) and MongoDB (task state). There is no leader. Each worker registers
+// in a registry and heartbeats, but only for visibility (GET /workers):
+// correctness comes from task leases. More load -> more worker processes,
+// no code change: that is "horizontal scaling" here.
 //
 // Why a separate process: a CPU-heavy or memory-hungry task can no longer
 // slow down or crash the API, and API and workers scale independently.
@@ -38,7 +41,17 @@ async function main() {
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
-    leaseGraceMs: config.worker.leaseGraceMs,
+    leaseMs: config.worker.leaseMs,
+  });
+  const registry = createWorkerRegistry({
+    Worker,
+    redis,
+    workerId,
+    host: os.hostname(),
+    pid: process.pid,
+    concurrency: config.worker.concurrency,
+    ttlMs: config.worker.leaseMs,
+    logger,
   });
   const worker = createQueueWorker({
     queue,
@@ -49,9 +62,10 @@ async function main() {
     concurrency: config.worker.concurrency,
     pollIntervalMs: config.worker.pollIntervalMs,
     claimLeaseMs: config.worker.claimLeaseMs,
-    leaseGraceMs: config.worker.leaseGraceMs,
+    leaseMs: config.worker.leaseMs,
+    registry,
   });
-  worker.start();
+  await worker.start();
 
   // Every worker also runs the reconciler. Its steps are CAS or idempotent
   // enqueues, so several workers reconciling at once is safe (just redundant).
