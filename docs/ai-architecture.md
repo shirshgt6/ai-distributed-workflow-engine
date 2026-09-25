@@ -1,6 +1,6 @@
 # AI architecture
 
-> Built so far: provider abstraction (13), structured output (14), **classification (15)** and **model routing (16)**.
+> Built so far: provider abstraction (13), structured output (14), classification (15), model routing (16), **RAG (17–19, see [rag.md](rag.md))**.
 > Later sections are added as phases land.
 
 ## Provider abstraction (`src/ai/providers/`)

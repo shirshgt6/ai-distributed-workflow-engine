@@ -17,6 +17,9 @@ import { createTaskQueue } from "./queues/taskQueue.js";
 import { Worker } from "./models/worker.model.js";
 import { OutboxEvent } from "./models/outboxEvent.model.js";
 import { listWorkers } from "./workers/registry.js";
+import { createProviderFromConfig } from "./ai/providers/index.js";
+import { createRagFromConfig } from "./ai/rag/index.js";
+import { KnowledgeDocument } from "./models/knowledge.model.js";
 import { createExecutionService } from "./services/execution.service.js";
 
 // Composition root: the ONE place that reads config, creates real
@@ -50,6 +53,9 @@ async function main() {
     leaseMs: config.worker.leaseMs,
   });
   const executionService = createExecutionService({ Workflow, WorkflowExecution, Task, engine });
+  // RAG: document upload + search (ingestion embeds via the LLM provider).
+  const llm = createProviderFromConfig(config.llm);
+  const { rag, vectorStore } = createRagFromConfig({ config, provider: llm, logger });
 
   // The API only STARTS runs (MongoDB + enqueue to Redis). Tasks are executed
   // by separate worker processes: `npm run worker` (src/worker.js). The
@@ -63,12 +69,14 @@ async function main() {
     checks: {
       mongo: pingMongo,
       redis: () => pingRedis(redis),
+      qdrant: () => vectorStore.ping(),
     },
     isShuttingDown: () => shuttingDown,
     auth: { authService, tokens },
     workflowService,
     executionService,
     admin: { listWorkers: () => listWorkers({ Worker, redis }) },
+    knowledge: { rag, KnowledgeDocument },
   });
 
   const server = app.listen(config.port, () => {

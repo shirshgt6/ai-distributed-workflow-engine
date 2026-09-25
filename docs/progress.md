@@ -20,9 +20,9 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 14 | Structured output + validation | ✅ |
 | 15 | AI task classification | ✅ |
 | 16 | AI model routing | ✅ |
-| 17 | RAG ingestion pipeline | ⬜ |
-| 18 | Qdrant retrieval | ⬜ |
-| 19 | LangChain.js integration | ⬜ |
+| 17 | RAG ingestion pipeline | ✅ |
+| 18 | Qdrant retrieval | ✅ |
+| 19 | LangChain.js integration | ✅ |
 | 20 | Controlled AI agents + tools | ⬜ |
 | 21 | Human-in-the-loop | ⬜ |
 | 22 | AI retry/fallback | ⬜ |
@@ -275,3 +275,15 @@ provider coming from config.
 heuristic after repairs), and e2e runs classify→route→generate (the small vs large model actually answers, no double
 classification, a RAG route refused by generate, an LLM timeout retried and succeeding). Real model: classification plus routing.
 **Finding**: the small model missed a RAG case with v1; few-shot v2 fixed it for that query (3/3 runs). This isn't an evaluation.
+
+## Phases 17–19 — RAG ingestion, Qdrant retrieval, LangChain.js ✅
+**Implemented**: `KnowledgeDocument` and `KnowledgeChunk` models; clean → hash-dedupe → chunk (LangChain splitter) → embed →
+MongoDB + Qdrant, with failure cleanup; a Qdrant vector store (one collection per model and dimension, ownerId payload index
+and filter, Query API); `rag.answer` (top-K + threshold, numbered delimited context, citations validated as an enum of
+retrieved ids, refusal without evidence); the `ai.rag` handler (scoped to the run owner); `POST/GET/DELETE /documents` and
+`POST /knowledge/search`; Qdrant in compose and in `/ready`.
+**Tests**: 310 total (plus real-model RAG in `test:llm`).
+**Bugs found**: the Qdrant client 1.19 removed `search` (moved to `query`); `cleanText` didn't collapse tabs; RAG prompt v1
+made the small model return `grounded:false` for cited answers (fixed with v2 positive-first).
+**Honest limitation**: qwen2.5:0.5b is unreliable at citing sources for multi-paragraph chunks, so the system refuses rather
+than answer uncited. See docs/rag.md.

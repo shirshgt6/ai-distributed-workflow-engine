@@ -56,6 +56,12 @@ const envSchema = z.object({
   LLM_MODEL_LARGE: z.string().default("qwen2.5:0.5b"),
   EMBEDDING_MODEL: z.string().default("nomic-embed-text"),
   LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(60_000),
+  // RAG (Phase 17-18)
+  QDRANT_URL: z.string().url().default("http://localhost:6333"),
+  RAG_CHUNK_SIZE: z.coerce.number().int().min(100).max(8000).default(800),
+  RAG_CHUNK_OVERLAP: z.coerce.number().int().min(0).max(2000).default(100),
+  RAG_TOP_K: z.coerce.number().int().min(1).max(20).default(4),
+  RAG_MIN_SCORE: z.coerce.number().min(0).max(1).default(0.5),
   // Scheduler (Phase 12): how often the leader looks for due cron schedules.
   SCHEDULER_TICK_MS: z.coerce.number().int().min(100).default(5000),
   RECONCILE_STALE_MS: z.coerce.number().int().min(100).default(10_000),
@@ -126,6 +132,13 @@ export function loadConfig(source = process.env) {
       relayIntervalMs: env.OUTBOX_RELAY_INTERVAL_MS,
     }),
     scheduler: Object.freeze({ tickMs: env.SCHEDULER_TICK_MS }),
+    rag: Object.freeze({
+      qdrantUrl: env.QDRANT_URL,
+      chunkSize: env.RAG_CHUNK_SIZE,
+      chunkOverlap: env.RAG_CHUNK_OVERLAP,
+      topK: env.RAG_TOP_K,
+      minScore: env.RAG_MIN_SCORE,
+    }),
     llm: Object.freeze({
       provider: env.LLM_PROVIDER,
       baseUrl: env.LLM_BASE_URL,

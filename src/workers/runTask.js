@@ -33,7 +33,14 @@ export async function runTask({ claimed, engine, handlers, logger, signal }) {
       // Promise.resolve().then(): a handler that throws synchronously becomes
       // a rejected promise instead of escaping withTimeout.
       Promise.resolve().then(() =>
-        handler({ config: task.config ?? {}, input, parents, attempt: task.attempt, signal: controller.signal })
+        handler({
+          config: task.config ?? {},
+          input,
+          parents,
+          attempt: task.attempt,
+          ownerId: String(task.ownerId), // whose data this run may touch (RAG, agent tools)
+          signal: controller.signal,
+        })
       ),
       task.timeoutMs,
       `task "${task.key}"`

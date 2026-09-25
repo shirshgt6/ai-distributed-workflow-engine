@@ -52,3 +52,37 @@ test("real classification + routing of a request", async () => {
   console.log(`[real classifier] ${JSON.stringify(r.classification)} (${r.attempts} attempt(s)) -> route ${route.mode}/${route.tier}`);
   expect(["direct", "rag", "agent"]).toContain(route.mode);
 }, 180_000);
+
+test("real RAG: nomic embeddings -> Qdrant -> qwen answer with a validated citation", async () => {
+  const mongoose = (await import("mongoose")).default;
+  const { createVectorStore } = await import("../../src/ai/rag/vectorStore.js");
+  const { createRagPipeline } = await import("../../src/ai/rag/pipeline.js");
+  const { KnowledgeDocument, KnowledgeChunk } = await import("../../src/models/knowledge.model.js");
+  const { createLogger } = await import("../../src/config/logger.js");
+  await mongoose.connect(process.env.MONGO_URI_TEST ?? "mongodb://localhost:27018/workflow_engine_llm_test?directConnection=true");
+  const vectorStore = createVectorStore({ url: "http://localhost:6333", prefix: `llmtest_${Date.now()}` });
+  const models = { small: MODEL, large: MODEL, embedding: process.env.EMBEDDING_MODEL ?? "nomic-embed-text" };
+  const rag = createRagPipeline({ provider, vectorStore, models, KnowledgeDocument, KnowledgeChunk, logger: createLogger({ level: "silent" }), chunkSize: 300, chunkOverlap: 50, minScore: 0.5 });
+  const ownerId = new mongoose.Types.ObjectId();
+  try {
+    await rag.ingest({
+      ownerId,
+      title: "Leave policy",
+      content:
+        "Annual leave: new employees receive 18 days of paid annual leave per year. Unused leave carries over up to 5 days.\n\n" +
+        "Office hours: the office is open from 9 am to 6 pm, Monday to Friday.\n\n" +
+        "Laptops: every employee gets a company laptop on their first day.",
+    });
+    const r = await rag.answer({ ownerId, question: "How many days of paid annual leave do new employees get?", model: MODEL });
+    console.log(`[real RAG] answer=${JSON.stringify(r.answer)} grounded=${r.grounded} citations=${JSON.stringify(r.citations.map((c) => c.id + "@" + c.score))} retrieved=${r.retrieved}`);
+    expect(r.retrieved).toBeGreaterThan(0);
+    if (r.grounded) expect(r.citations.length).toBeGreaterThan(0);
+    const off = await rag.answer({ ownerId, question: "What is the capital of Australia's second largest state?", model: MODEL });
+    console.log(`[real RAG, off-topic] answer=${JSON.stringify(off.answer)} grounded=${off.grounded} retrieved=${off.retrieved}`);
+  } finally {
+    await vectorStore.deleteCollection(models.embedding, 768);
+    await KnowledgeDocument.deleteMany({ ownerId });
+    await KnowledgeChunk.deleteMany({ ownerId });
+    await mongoose.disconnect();
+  }
+}, 300_000);
