@@ -5,10 +5,10 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: core engine complete (Phases 1–8 + idempotent runs).** Workflows run on separate, horizontally
-> scalable worker processes through a reliable Redis queue, with retries, backoff, dead-lettering and crash recovery.
-> **Not built:** Kafka events, scheduled workflows, and the entire AI layer (LLM providers, RAG, agents). See
-> [docs/progress.md](docs/progress.md). See [docs/progress.md](docs/progress.md)
+> **Status: Phases 1–14 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
+> queue (retries, dead-lettering, crash recovery, heartbeats, pause/cancel, cron schedules, Kafka events). The AI layer has
+> started (provider abstraction + validated structured output); see [docs/ai-architecture.md](docs/ai-architecture.md).
+> See [docs/progress.md](docs/progress.md)
 > for exactly what is implemented, and [ARCHITECTURE.md](ARCHITECTURE.md)
 > for the target design.
 
@@ -100,7 +100,8 @@ other local projects using the default ports.
 | `npm run consumer:analytics` | Kafka consumer that aggregates lifecycle events |
 | `npm test` | Unit tests (no Docker needed) |
 | `npm run test:integration` | Integration tests against real Mongo/Redis (`infra:up` first) |
-| `npm run test:all` | Both |
+| `npm run test:all` | Unit + integration |
+| `npm run test:llm` | Real-model tests against local Ollama (opt-in) |
 | `npm run lint` | ESLint |
 | `npm run create-admin` | Create or promote an admin (reads `ADMIN_EMAIL` / `ADMIN_PASSWORD`) |
 | `npm run infra:up` / `infra:down` | Start / stop local infrastructure |

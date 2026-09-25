@@ -16,8 +16,8 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 10 | Worker heartbeat + crash recovery | ✅ |
 | 11 | Kafka event architecture (transactional outbox) | ✅ |
 | 12 | Scheduled workflows | ✅ |
-| 13 | LLM provider abstraction | ⬜ |
-| 14 | Structured output + validation | ⬜ |
+| 13 | LLM provider abstraction | ✅ |
+| 14 | Structured output + validation | ✅ |
 | 15 | AI task classification | ⬜ |
 | 16 | AI model routing | ⬜ |
 | 17 | RAG ingestion pipeline | ⬜ |
@@ -257,3 +257,12 @@ outage, a crash between start and advance deduplicated, two concurrent scheduler
 1 run** (idempotency is the real guarantee), a broken graph not blocking the schedule, and the API with auth.
 **Bug found by tests**: an unknown timezone ("Mars/Olympus") was accepted, because cron-parser doesn't validate it at parse
 time. It's now validated with `Intl.DateTimeFormat`.
+
+## Phases 13–14 — LLM provider abstraction + structured output ✅
+**Implemented**: the provider interface (`chat`, `embed`); an OpenAI-compatible provider over `fetch` (Ollama locally) with
+normalised, retryable-aware `ProviderError` and timeouts; a deterministic mock provider (bag-of-words embeddings);
+`generateStructured` (JSON Schema from zod in the prompt, JSON mode, zod validation, repair turns, `StructuredOutputError`);
+prompt-injection delimiters; LLM config (`LLM_*`, `EMBEDDING_MODEL`); an opt-in real-model suite `npm run test:llm`.
+**Tests**: unit tests for validation and repair (malformed JSON, schema violation, exhaustion, stripped keys), provider HTTP
+mapping, error classification, timeout and key hygiene. The real Ollama suite passes (structured output, and embeddings where
+related texts are closer).
