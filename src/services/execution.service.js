@@ -1,5 +1,20 @@
+import { createHash } from "node:crypto";
 import { ownerScope } from "../auth/ownership.js";
-import { NotFoundError } from "../utils/errors.js";
+import { AppError, NotFoundError } from "../utils/errors.js";
+
+const DUPLICATE_KEY = 11000;
+
+/** JSON with object keys sorted, so {a,b} and {b,a} hash the same. */
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
 
 /**
  * HTTP-facing operations on executions. Ownership is enforced here (in the
@@ -9,17 +24,53 @@ import { NotFoundError } from "../utils/errors.js";
  */
 export function createExecutionService({ Workflow, WorkflowExecution, Task, engine }) {
   return {
-    async run(user, workflowId, input) {
+    /**
+     * Start a run. With an idempotency key, retrying the SAME request (double
+     * click, network retry after a timeout) returns the run that was already
+     * created instead of starting a second one.
+     *
+     * @returns {Promise<{ execution, replayed: boolean }>}
+     */
+    async run(user, workflowId, input, { idempotencyKey } = {}) {
       const workflow = await Workflow.findOne({ _id: workflowId, ...ownerScope(user) });
       if (!workflow) throw new NotFoundError("Workflow not found");
-      return engine.startExecution({ workflow, input, triggeredBy: user.id });
+
+      const requestHash = idempotencyKey
+        ? createHash("sha256").update(canonical({ workflowId: String(workflowId), input })).digest("hex")
+        : undefined;
+
+      try {
+        const execution = await engine.startExecution({
+          workflow,
+          input,
+          triggeredBy: user.id,
+          idempotencyKey,
+          requestHash,
+        });
+        return { execution, replayed: false };
+      } catch (err) {
+        const isKeyClash = idempotencyKey && err?.code === DUPLICATE_KEY && err?.keyPattern?.idempotencyKey;
+        if (!isKeyClash) throw err;
+
+        // The unique index said "this key was already used by this user".
+        const existing = await WorkflowExecution.findOne({ triggeredBy: user.id, idempotencyKey });
+        if (existing.requestHash !== requestHash) {
+          // Same key, DIFFERENT request: almost certainly a client bug.
+          // Replaying the old response would silently hide it.
+          throw new AppError("Idempotency-Key was already used with a different request", {
+            statusCode: 422,
+            code: "IDEMPOTENCY_KEY_REUSED",
+          });
+        }
+        return { execution: existing, replayed: true };
+      }
     },
 
     async get(user, executionId) {
       const execution = await WorkflowExecution.findOne({ _id: executionId, ...ownerScope(user) });
       if (!execution) throw new NotFoundError("Execution not found");
       const tasks = await Task.find({ executionId: execution._id })
-        .select("key type status dependsOn attempt output error readyAt startedAt completedAt")
+        .select("key type status dependsOn attempt maxAttempts output error readyAt retryAt startedAt completedAt")
         .sort({ _id: 1 });
       return { execution, tasks };
     },

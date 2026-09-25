@@ -5,8 +5,10 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phase 6 of 28 complete — workflows run through a reliable Redis queue with leases and crash recovery.**
-> The worker still runs inside the API process; separate worker processes are Phase 7. See [docs/progress.md](docs/progress.md)
+> **Status: core engine complete (Phases 1–8 + idempotent runs).** Workflows run on separate, horizontally
+> scalable worker processes through a reliable Redis queue, with retries, backoff, dead-lettering and crash recovery.
+> **Not built:** Kafka events, scheduled workflows, and the entire AI layer (LLM providers, RAG, agents). See
+> [docs/progress.md](docs/progress.md). See [docs/progress.md](docs/progress.md)
 > for exactly what is implemented, and [ARCHITECTURE.md](ARCHITECTURE.md)
 > for the target design.
 
@@ -31,6 +33,10 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
 - **Reliable Redis queue**: atomic Lua claim with a lease (no "popped then lost" jobs), a reaper,
   delayed tasks, and dedupe. Worker takeover after a crash uses fencing tokens, and a reconciler rebuilds
   Redis from MongoDB. See [docs/redis.md](docs/redis.md)
+- **Separate worker processes** (`npm run worker`): run as many as needed, with graceful shutdown on SIGTERM
+- **Retries**: transient vs non-retryable errors, exponential backoff with full jitter, dead-lettering when
+  attempts run out, and a poison-pill guard
+- **Idempotent runs**: an `Idempotency-Key` header makes retried `POST /workflows/:id/run` calls return the same run
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)
 
@@ -47,7 +53,8 @@ Prerequisites: Node.js ≥ 20.11, Docker Desktop running.
 npm install
 cp .env.example .env        # then replace the JWT secret placeholders (below)
 npm run infra:up            # start MongoDB + Redis, wait until healthy
-npm run dev                 # API on http://localhost:4000
+npm run dev                 # terminal 1: API on http://localhost:4000
+npm run worker              # terminal 2 (and 3, 4... for more workers): executes tasks
 ```
 
 Replace the placeholder `JWT_*_SECRET` values in `.env` with random ones:
@@ -85,6 +92,7 @@ other local projects using the default ports.
 |---|---|
 | `npm run dev` | Start API with auto-reload |
 | `npm start` | Start API |
+| `npm run worker` / `dev:worker` | Start a worker process (run several to scale out) |
 | `npm test` | Unit tests (no Docker needed) |
 | `npm run test:integration` | Integration tests against real Mongo/Redis (`infra:up` first) |
 | `npm run test:all` | Both |
@@ -103,9 +111,10 @@ src/
   models/            Mongoose models (User, Workflow, WorkflowExecution, Task, TaskExecution)
   repositories/      race-safe data operations (transitionTask)
   workflow/          engine, state machines, DAG validation, request schemas
+  worker.js          worker process entrypoint (queue worker + reconciler + graceful shutdown)
   queues/            Redis task queue (Lua scripts)
-  workers/           queue worker loop, runTask (handler + timeout + report)
-  handlers/          built-in task handlers (noop, delay, fail, echo)
+  workers/           queue worker loop, runTask (handler + timeout + report), retry policy
+  handlers/          built-in task handlers (noop, delay, fail, flaky, echo)
   middleware/        requestId, errorHandler, authenticate, authorize, validate
   controllers/       HTTP <-> service translation
   routes/            health, auth, workflows, executions
@@ -116,7 +125,8 @@ tests/unit/          fast tests, fake dependencies
 tests/integration/   real Mongo/Redis
 tests/helpers/       shared integration-test setup
 docker/              docker-compose.yml
-docs/                progress, decisions (ADRs), api-design, security, database-design, workflow-engine, redis
+docs/                progress, decisions (ADRs), api-design, security, database-design, workflow-engine, redis,
+                     interview-guide
 ```
 
 ## Benchmarks

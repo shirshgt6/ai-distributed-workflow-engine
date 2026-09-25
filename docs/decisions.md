@@ -161,3 +161,30 @@ Short ADRs: context → decision → consequences. New decisions are appended.
 - **Consequences:** Crash recovery works with any number of workers (Phase 5's "requeue everything RUNNING on boot"
   was only correct with one process). A task stalled past its timeout + grace is presumed dead, so the grace must
   cover GC pauses and slow reporting. There's no takeover limit yet (poison pill), which is Phase 8.
+
+## ADR-019: Workers are separate, stateless processes
+
+- **Decision:** `src/worker.js` runs the queue worker and the reconciler. The API only creates runs and enqueues them.
+  Workers share nothing except Redis and MongoDB. They have no leader and no registration.
+- **Consequences:** A heavy task can't starve or crash the API. API and workers scale independently, and adding
+  capacity means starting more processes. On SIGTERM a worker stops claiming, drains in-flight tasks, then exits. If
+  draining exceeds `SHUTDOWN_TIMEOUT_MS`, leases hand the task to another worker. A worker registry and heartbeats
+  aren't built yet.
+
+## ADR-020: Retry classification, full-jitter backoff, dead-letter
+
+- **Decision:** Errors are transient by default. `NonRetryableError` (or `retryable: false`) opts out. Transient
+  failures are retried after `random(0, min(60s, base × 2^(n−1)))` until `maxAttempts`, then dead-lettered.
+  Non-retryable failures fail immediately. Retries are scheduled through the Redis delayed set.
+- **Consequences:** Transient blips self-heal. Bad inputs fail fast instead of wasting attempts. Jitter prevents
+  synchronized retry storms. Handlers that aren't idempotent may repeat side effects on retry (at-least-once).
+
+## ADR-021: Idempotency key stored on the execution with a unique index
+
+- **Context:** A double click or a client retry after a timeout must not start two runs. A separate idempotency
+  table needs a two-step "reserve key, then create run" protocol that can be left half-done by a crash.
+- **Decision:** Store `idempotencyKey` and `requestHash` on the WorkflowExecution, with a unique partial index on
+  `(triggeredBy, idempotencyKey)`. A duplicate insert returns the existing run (202 + `Idempotent-Replayed`), or 422 if
+  the request differs.
+- **Consequences:** Atomic, with no stuck "in progress" records and no extra collection. Keys never expire (fine at
+  this scale; a TTL or cleanup job would be needed for high volume). This only covers run creation, not other POSTs.

@@ -8,7 +8,7 @@ This document has two clearly separated parts:
 
 ---
 
-## 1. Implemented (Phases 1–6)
+## 1. Implemented (Phases 1–8 + idempotent runs)
 
 ```
             ┌────────────────────────────── API process (src/server.js) ─┐
@@ -26,10 +26,15 @@ This document has two clearly separated parts:
             │       → ENGINE (transactions, CAS, pendingTasks counter)    │
             │            │ enqueue(taskId)          ▲ start/complete/fail │
             │            ▼                          │                     │
-            │   REDIS QUEUE ──claim (Lua: pop+lease)──► QUEUE WORKER      │
-            │   ready / leases / delayed / members      (N loops, ack last)│
-            │                                           → handlers        │
-            │   reconciler (interval): MongoDB truth → re-enqueue         │
+            └────────────┼──────────────────────────────────────────────┘
+                         ▼
+               REDIS QUEUE  ready / leases / delayed / members
+                         │  claim (Lua: pop + lease)     ▲ enqueueDelayed (retry backoff)
+            ┌────────────▼──────────────────────────────┴─────────────────┐
+            │ WORKER PROCESSES (npm run worker) × N, no leader            │
+            │   N claim loops → engine.startTask → handler (timeout)      │
+            │   → completeTask / failTask (retry | FAILED | DEAD_LETTER)  │
+            │   → ack last;  reaper + promoter;  reconciler; SIGTERM drain│
             │   → notFound → errorHandler (uniform JSON errors)           │
             └───────────────┬─────────────────────────┬───────────────────┘
                             ▼                         ▼
@@ -77,8 +82,14 @@ This document has two clearly separated parts:
 - **Leases + fencing for crash recovery.** A claimed task carries a lease
   (`timeoutMs + grace`, on the database's clock). If it expires, another worker takes
   over with a new `leaseToken`, and the dead worker's late report is rejected.
-- **Temporary:** the queue worker runs inside the API process. Phase 7 moves it to
-  its own process without changing the engine or the queue. Data model details are in
+- **Separate worker processes.** The API only starts runs. Workers are stateless and
+  coordinate only through Redis (who takes what) and MongoDB (state), so scaling out
+  means starting more of them. There's no leader and no registration.
+- **Retries belong to the task, not the queue.** A failed attempt is classified (transient
+  or not), and retried with exponential backoff and full jitter until `maxAttempts`, then
+  dead-lettered. Takeovers count as attempts, which guards against poison pills.
+- **Idempotency lives on the resource.** The `Idempotency-Key` is stored on the execution
+  under a unique index, so "create the run" and "remember the key" are one atomic insert. Data model details are in
   [docs/database-design.md](docs/database-design.md).
 
 ## 2. Target design (not implemented yet)

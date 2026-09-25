@@ -4,6 +4,7 @@ import { assertTransition, EXECUTION_STATUS as E, TASK_STATUS as T } from "./sta
 import { claimTask, transitionTask } from "../repositories/task.repository.js";
 import { ATTEMPT_STATUS } from "../models/taskExecution.model.js";
 import { ValidationError } from "../utils/errors.js";
+import { computeBackoff, isRetryable } from "../workers/retry.js";
 
 /**
  * THE WORKFLOW ENGINE — dependency resolution and orchestration.
@@ -24,14 +25,24 @@ import { ValidationError } from "../utils/errors.js";
  * @param {{
  *   models: { WorkflowExecution, Task, TaskExecution },
  *   enqueue: (item: { taskId: string, executionId: string, key: string }) => void | Promise<void>,
+ *   enqueueDelayed?: (item: { taskId: string }, delayMs: number) => void | Promise<void>,
  *   logger: import('pino').Logger,
  *   leaseGraceMs?: number,
+ *   backoff?: (attempt: number, baseDelayMs: number) => number,
  *   connection?: import('mongoose').Connection,
  * }} deps
  *   leaseGraceMs: extra time on top of a task's timeoutMs before its lease
  *   expires and another worker may take it over.
  */
-export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, connection = mongoose.connection }) {
+export function createEngine({
+  models,
+  enqueue,
+  enqueueDelayed,
+  logger,
+  leaseGraceMs = 10_000,
+  backoff = computeBackoff,
+  connection = mongoose.connection,
+}) {
   const { WorkflowExecution, Task, TaskExecution } = models;
 
   const now = () => new Date();
@@ -77,7 +88,17 @@ export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, c
     }
   }
 
-  return {
+  /** Same idea for retries: RETRYING is committed; Redis only schedules the wake-up. */
+  async function enqueueRetrySafely(task, delayMs) {
+    try {
+      if (enqueueDelayed) await enqueueDelayed({ taskId: String(task._id) }, delayMs);
+      else await enqueue({ taskId: String(task._id), executionId: String(task.executionId), key: task.key });
+    } catch (err) {
+      logger.warn({ taskId: String(task._id), err: err.message }, "scheduling retry failed; the reconciler will retry");
+    }
+  }
+
+  const engine = {
     dispatchReady,
 
     /**
@@ -92,9 +113,11 @@ export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, c
      * dispatch, the READY tasks are still on the whiteboard and the
      * reconciler (reconcile) will dispatch them.
      *
-     * @param {{ workflow: object, input?: object, triggeredBy?: string }} params
+     * @param {{ workflow: object, input?: object, triggeredBy?: string, idempotencyKey?: string, requestHash?: string }} params
+     *   A duplicate idempotencyKey (same triggeredBy) makes the insert fail
+     *   with a duplicate-key error (code 11000); the caller decides how to reply.
      */
-    async startExecution({ workflow, input = {}, triggeredBy }) {
+    async startExecution({ workflow, input = {}, triggeredBy, idempotencyKey, requestHash }) {
       // Defence in depth: definitions saved before graph validation existed
       // (Phase 3) could be invalid. Never start a run that can't finish.
       const check = validateDag(workflow.tasks);
@@ -125,6 +148,8 @@ export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, c
               status: E.RUNNING,
               input,
               triggeredBy,
+              idempotencyKey,
+              requestHash,
               startedAt,
               taskCount: workflow.tasks.length,
               pendingTasks: workflow.tasks.length,
@@ -192,6 +217,19 @@ export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, c
         workerId,
         leaseToken: task.leaseToken,
       });
+
+      // POISON-PILL GUARD. Takeovers also consume attempts. A task whose
+      // previous attempts all vanished (e.g. it crashes its worker every time)
+      // would otherwise be taken over forever. Past maxAttempts: dead-letter
+      // it without running it again.
+      if (task.attempt > task.maxAttempts) {
+        await engine.failTask({
+          taskId: task._id,
+          leaseToken: task.leaseToken,
+          error: new Error(`Exceeded ${task.maxAttempts} attempts (previous attempts were abandoned by lost workers)`),
+        });
+        return null;
+      }
 
       // Data flow along the DAG: each handler receives its parents' outputs.
       const [execution, parents] = await Promise.all([
@@ -294,35 +332,41 @@ export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, c
     },
 
     /**
-     * A task failed. Phase 5 policy: FAIL-FAST, no retries yet (Phase 8).
-     * ONE transaction:
-     *   1. RUNNING -> FAILED (CAS + fencing; duplicate/stale = no-op)
-     *   2. if the execution is still RUNNING:
-     *        - every task that has NOT started (PENDING / READY / QUEUED)
-     *          -> CANCELLED: they can never all be satisfied now
-     *        - execution RUNNING -> FAILED
-     *      Tasks already RUNNING are left to finish; their results are
-     *      recorded, but completeTask won't start anything new because the
-     *      execution is no longer RUNNING.
+     * A task attempt failed. ONE transaction decides between:
      *
-     * @returns {Promise<{ applied: boolean }>}
+     *   RETRY        error is transient AND attempts remain AND the run is
+     *                still RUNNING  ->  RUNNING -> RETRYING, and after commit
+     *                schedule a delayed wake-up (exponential backoff + jitter).
+     *                pendingTasks is untouched: the task isn't finished.
+     *
+     *   DEAD_LETTER  transient error but attempts EXHAUSTED -> RUNNING -> FAILED
+     *                -> DEAD_LETTER: parked for a human to inspect.
+     *
+     *   FAILED       non-retryable error (or the run already failed) ->
+     *                RUNNING -> FAILED.
+     *
+     * Either terminal outcome then applies FAIL-FAST: unstarted tasks
+     * (PENDING / READY / QUEUED / RETRYING) are CANCELLED and the execution
+     * becomes FAILED. Tasks already RUNNING may finish; nothing new starts.
+     *
+     * The first read is conditional on status RUNNING + this leaseToken, so a
+     * duplicate or stale (fenced) report is a no-op.
+     *
+     * @returns {Promise<{ applied: boolean, outcome?: "RETRYING"|"FAILED"|"DEAD_LETTER", delayMs?: number }>}
      */
     async failTask({ taskId, leaseToken, error }) {
       const message = String(error?.message ?? error ?? "Task failed").slice(0, 2000);
-      let applied = false;
+      const retryable = isRetryable(error);
+      let result = { applied: false };
+      let retryTask = null;
 
       await connection.transaction(async (session) => {
-        applied = false;
+        result = { applied: false };
+        retryTask = null;
         const finishedAt = now();
 
-        const won = await transitionTask(taskId, T.RUNNING, T.FAILED, {
-          where: { leaseToken },
-          set: { error: message, completedAt: finishedAt, leaseOwner: null, leaseExpiresAt: null },
-          session,
-        });
-        if (!won) return;
-
-        const task = await Task.findById(taskId, null, { session });
+        const task = await Task.findOne({ _id: taskId, status: T.RUNNING, leaseToken }, null, { session });
+        if (!task) return; // duplicate or stale report
 
         await TaskExecution.updateOne(
           { taskId, attempt: task.attempt },
@@ -331,43 +375,88 @@ export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, c
               status: error?.name === "TimeoutError" ? ATTEMPT_STATUS.TIMED_OUT : ATTEMPT_STATUS.FAILED,
               finishedAt,
               durationMs: task.startedAt ? finishedAt - task.startedAt : null,
-              error: { message, retryable: false },
+              error: { message, retryable },
             },
           },
           { session }
         );
 
-        const execution = await WorkflowExecution.findOneAndUpdate(
+        const execution = await WorkflowExecution.findById(task.executionId, null, { session });
+        const attemptsLeft = task.attempt < task.maxAttempts;
+
+        // ---- RETRY --------------------------------------------------------
+        if (retryable && attemptsLeft && execution.status === E.RUNNING) {
+          const delayMs = backoff(task.attempt, task.baseDelayMs);
+          const won = await transitionTask(taskId, T.RUNNING, T.RETRYING, {
+            where: { leaseToken },
+            set: {
+              error: message,
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              retryAt: new Date(finishedAt.getTime() + delayMs),
+            },
+            session,
+          });
+          if (!won) return;
+          retryTask = task;
+          result = { applied: true, outcome: T.RETRYING, delayMs };
+          return;
+        }
+
+        // ---- TERMINAL: FAILED or DEAD_LETTER -------------------------------
+        const outcome = retryable && !attemptsLeft ? T.DEAD_LETTER : T.FAILED;
+        const won = await transitionTask(taskId, T.RUNNING, T.FAILED, {
+          where: { leaseToken },
+          set: { error: message, completedAt: finishedAt, leaseOwner: null, leaseExpiresAt: null },
+          session,
+        });
+        if (!won) return;
+        if (outcome === T.DEAD_LETTER) {
+          await transitionTask(taskId, T.FAILED, T.DEAD_LETTER, { session });
+        }
+
+        const updated = await WorkflowExecution.findOneAndUpdate(
           { _id: task.executionId },
           { $inc: { pendingTasks: -1 } },
           { returnDocument: "after", session }
         );
 
-        if (execution.status === E.RUNNING) {
+        if (updated.status === E.RUNNING) {
           const cancelled = await Task.updateMany(
-            { executionId: task.executionId, status: { $in: [T.PENDING, T.READY, T.QUEUED] } },
+            { executionId: task.executionId, status: { $in: [T.PENDING, T.READY, T.QUEUED, T.RETRYING] } },
             { $set: { status: T.CANCELLED, completedAt: finishedAt } },
             { session }
           );
+          const why =
+            outcome === T.DEAD_LETTER
+              ? `failed after ${task.attempt} attempt(s) and was dead-lettered`
+              : "failed";
           assertTransition("execution", E.RUNNING, E.FAILED);
           await WorkflowExecution.updateOne(
-            { _id: execution._id, status: E.RUNNING },
+            { _id: updated._id, status: E.RUNNING },
             {
-              $set: { status: E.FAILED, error: `Task "${task.key}" failed: ${message}`, completedAt: finishedAt },
+              $set: { status: E.FAILED, error: `Task "${task.key}" ${why}: ${message}`, completedAt: finishedAt },
               $inc: { pendingTasks: -cancelled.modifiedCount },
             },
             { session }
           );
           logger.warn(
-            { executionId: String(execution._id), taskKey: task.key, cancelled: cancelled.modifiedCount },
+            { executionId: String(updated._id), taskKey: task.key, outcome, cancelled: cancelled.modifiedCount },
             "execution failed (fail-fast)"
           );
         }
 
-        applied = true;
+        result = { applied: true, outcome };
       });
 
-      return { applied };
+      if (retryTask) {
+        logger.info(
+          { taskKey: retryTask.key, attempt: retryTask.attempt, delayMs: result.delayMs },
+          "task will be retried"
+        );
+        await enqueueRetrySafely(retryTask, result.delayMs);
+      }
+      return result;
     },
 
     /**
@@ -383,13 +472,15 @@ export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, c
      *      it's still there).
      *   3. RUNNING with an expired lease  -> its worker is gone and Redis may
      *      have lost the lease too: enqueue so a worker can take it over.
+     *   4. RETRYING whose retryAt passed more than staleMs ago -> the delayed
+     *      wake-up was lost (Redis down when scheduling it): enqueue now.
      *
-     * @returns {Promise<{ ready: number, queued: number, running: number }>}
+     * @returns {Promise<{ ready: number, queued: number, running: number, retrying: number }>}
      *   queued/running count enqueue calls made, not tasks actually missing
      */
     async reconcile({ staleMs, limit = 100 }) {
       const cutoff = new Date(Date.now() - staleMs);
-      const counts = { ready: 0, queued: 0, running: 0 };
+      const counts = { ready: 0, queued: 0, running: 0, retrying: 0 };
 
       const stuckReady = await Task.find({ status: T.READY, readyAt: { $lt: cutoff } })
         .select("_id key executionId")
@@ -415,8 +506,17 @@ export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, c
         if (await enqueueSafely(task)) counts.running += 1;
       }
 
-      if (counts.ready + counts.running > 0) logger.warn(counts, "reconciler re-dispatched tasks");
+      const overdueRetries = await Task.find({ status: T.RETRYING, retryAt: { $lt: cutoff } })
+        .select("_id key executionId")
+        .limit(limit);
+      for (const task of overdueRetries) {
+        if (await enqueueSafely(task)) counts.retrying += 1;
+      }
+
+      if (counts.ready + counts.running + counts.retrying > 0) logger.warn(counts, "reconciler re-dispatched tasks");
       return counts;
     },
   };
+
+  return engine;
 }

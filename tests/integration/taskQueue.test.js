@@ -121,6 +121,25 @@ describe("delayed tasks", () => {
     expect(await queue.stats()).toMatchObject({ ready: 1, delayed: 0 });
   });
 
+  test("REGRESSION: a failing task's retry survives the worker's ack (leased -> delayed)", async () => {
+    await queue.enqueue("t1");
+    await queue.claim(5000); // worker holds the lease
+    expect(await queue.enqueueDelayed("t1", 0)).toBe(true); // engine schedules the retry
+    expect(await queue.ack("t1")).toBe(false); // worker acks after reporting: lease already moved
+    expect(await queue.promoteDue()).toEqual(["t1"]);
+    expect(await queue.claim(5000)).toBe("t1"); // the retry really happens
+  });
+
+  test("ack after the lease was reaped leaves the requeued entry alone", async () => {
+    await queue.enqueue("t1");
+    await queue.claim(10);
+    await sleep(30);
+    await queue.requeueExpired(); // back in ready
+    expect(await queue.ack("t1")).toBe(false); // the slow original worker finally acks
+    expect(await queue.enqueue("t1")).toBe(false); // still a member: no duplicate can be added
+    expect(await queue.claim(5000)).toBe("t1");
+  });
+
   test("delayed enqueue is deduplicated with the ready list", async () => {
     await queue.enqueue("t1");
     expect(await queue.enqueueDelayed("t1", 0)).toBe(false);

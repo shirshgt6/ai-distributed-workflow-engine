@@ -1,4 +1,5 @@
 import { withTimeout } from "../utils/withTimeout.js";
+import { NonRetryableError } from "./retry.js";
 
 /**
  * Run ONE already-claimed task's handler and report the outcome to the engine.
@@ -24,11 +25,14 @@ export async function runTask({ claimed, engine, handlers, logger }) {
   let failure = null;
   const started = Date.now();
   try {
-    if (!handler) throw new Error(`No handler registered for task type "${task.type}"`);
+    // Retrying can't make a missing handler appear: fail permanently.
+    if (!handler) throw new NonRetryableError(`No handler registered for task type "${task.type}"`);
     output = await withTimeout(
       // Promise.resolve().then(): a handler that throws synchronously becomes
       // a rejected promise instead of escaping withTimeout.
-      Promise.resolve().then(() => handler({ config: task.config ?? {}, input, parents, signal: controller.signal })),
+      Promise.resolve().then(() =>
+        handler({ config: task.config ?? {}, input, parents, attempt: task.attempt, signal: controller.signal })
+      ),
       task.timeoutMs,
       `task "${task.key}"`
     );

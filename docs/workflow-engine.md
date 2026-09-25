@@ -1,7 +1,8 @@
 # Workflow Engine
 
-> **Implemented so far (Phases 3–6):** state machines, the conditional transition primitive, the data model, DAG validation, **execution** (dependency resolution, fail-fast, reconciliation), and dispatch through a **Redis queue** with leases and takeover (see [redis.md](redis.md)).
-> **Not implemented yet:** separate worker processes (Phase 7), retries (Phase 8), pause/resume/cancel, and heartbeats (Phase 10).
+> **Implemented so far (Phases 3–8):** state machines, the conditional transition primitive, the data model, DAG validation, **execution** (dependency resolution, fail-fast, reconciliation), and dispatch through a **Redis queue** with leases and takeover (see [redis.md](redis.md)).
+> Retries with backoff and dead-lettering (Phase 8) are covered below; separate worker processes (Phase 7) are covered in [redis.md](redis.md).
+> **Not implemented yet:** pause/resume/cancel endpoints, heartbeats (Phase 10), Kafka events, scheduling.
 
 ## Definition vs execution
 
@@ -129,10 +130,25 @@ queue worker (pulls ids from Redis)
 within one run are serialised by write conflicts and retries. That's fine for ≤ 100 tasks per run. At much
 larger fan-out, the counter could be sharded or completion checked asynchronously.
 
+### Retries (Phase 8)
+`failTask` classifies each failed attempt in one transaction:
+
+| Error | Attempts left? | Run still RUNNING? | Outcome |
+|---|---|---|---|
+| transient (default; includes timeouts) | yes | yes | **RETRYING**, then `enqueueDelayed(backoff)`. `pendingTasks` is unchanged |
+| transient | **no** | — | **DEAD_LETTER** (RUNNING → FAILED → DEAD_LETTER), then fail-fast |
+| `NonRetryableError` (bad input, business rule, missing handler) | — | — | **FAILED**, then fail-fast |
+| anything | — | no (a sibling already failed) | **FAILED** |
+
+- **Backoff:** `random(0, min(60s, baseDelayMs × 2^(attempt−1)))`, i.e. exponential with *full jitter*, so that many tasks failing together don't retry in lock-step (a retry storm).
+- RETRYING is claimable once Redis releases it from the delayed set. The Redis script moves the id **from the worker's lease into the delayed set**, and `ack` only clears membership if the lease is still there. (Without this, the worker's ack erased the scheduled retry. The Phase 8 tests caught it.)
+- **Poison pill:** takeovers also increment `attempt`. A task past `maxAttempts` after a takeover is dead-lettered without running.
+- **Lost wake-up:** the reconciler re-enqueues RETRYING tasks whose `retryAt` passed long ago.
+
 ### Failure policy: fail-fast
-When a task fails (no retries until Phase 8):
+When a task fails for good (FAILED or DEAD_LETTER):
 - the task becomes FAILED
-- all tasks not yet started (PENDING, READY, QUEUED) become CANCELLED
+- all tasks not yet started (PENDING, READY, QUEUED, RETRYING) become CANCELLED
 - the execution becomes FAILED immediately, with `error = 'Task "<key>" failed: <message>'`
 - tasks already RUNNING are allowed to finish. Their results are recorded, but nothing new is promoted.
 

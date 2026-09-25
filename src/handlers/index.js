@@ -5,11 +5,16 @@
 //   config  — the task's config from the workflow definition
 //   input   — the execution's input (POST /workflows/:id/run body)
 //   parents — { [parentKey]: parentOutput } — data flowing along the DAG
+//   attempt — 1 for the first try, 2 for the first retry, ...
 //   signal  — AbortSignal, fired on timeout; long work should stop when it fires
 // and returns a JSON-serialisable output (stored on the task, passed to children).
+// Throw NonRetryableError for permanent failures; any other error is retried
+// (up to the task's retryPolicy.maxAttempts).
 //
 // These are deliberately simple built-ins for exercising the engine. Real
 // ones (HTTP calls, AI tasks, human approval) arrive in later phases.
+
+import { NonRetryableError } from "../workers/retry.js";
 
 const MAX_DELAY_MS = 60_000;
 
@@ -40,9 +45,22 @@ export const handlers = Object.freeze({
     return { waitedMs: ms };
   },
 
-  /** Always throws — exercises the failure path. */
+  /**
+   * Always throws. Permanent (non-retryable) by default, like a business
+   * error; config.retryable: true makes it transient, so it's retried until
+   * attempts run out and then dead-lettered.
+   */
   fail: async ({ config }) => {
-    throw new Error(config.message ?? "Task configured to fail");
+    const message = config.message ?? "Task configured to fail";
+    if (config.retryable === true) throw new Error(message);
+    throw new NonRetryableError(message);
+  },
+
+  /** Fails (transiently) on its first config.failTimes attempts, then succeeds. */
+  flaky: async ({ config, attempt }) => {
+    const failTimes = Number(config.failTimes ?? 1);
+    if (attempt <= failTimes) throw new Error(`flaky failure on attempt ${attempt}/${failTimes}`);
+    return { succeededOnAttempt: attempt };
   },
 
   /** Returns what it received — shows data flowing between tasks. */

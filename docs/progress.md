@@ -10,9 +10,9 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 4 | DAG validation | ✅ |
 | 5 | Workflow execution engine | ✅ |
 | 6 | Redis task scheduling | ✅ |
-| 7 | Distributed workers | ⬜ |
-| 8 | Concurrency + retries + backoff | ⬜ |
-| 9 | Idempotency + distributed locks | ⬜ |
+| 7 | Distributed workers | ✅ |
+| 8 | Concurrency + retries + backoff | ✅ |
+| 9 | Idempotency + distributed locks | 🟡 idempotent run creation only; no distributed locks |
 | 10 | Worker heartbeat + crash recovery | ⬜ |
 | 11 | Kafka event architecture (transactional outbox) | ⬜ |
 | 12 | Scheduled workflows | ⬜ |
@@ -195,3 +195,30 @@ no token bump. All 5 were caught.
 
 **Known limitations**: the worker runs in the API process (Phase 7); no heartbeat, so leases are fixed at timeout + grace
 (Phase 10); no retry or takeover limit (Phase 8); single Redis node.
+
+## Phases 7–8 + idempotent runs ✅ (built in one fast-track session)
+
+**Implemented**
+- `src/worker.js`: separate worker process (`npm run worker`) running the queue worker, reconciler and graceful
+  SIGTERM drain. The API no longer executes tasks
+- Retries: `src/workers/retry.js` (`NonRetryableError`, `isRetryable`, `computeBackoff` with full jitter). `failTask`
+  decides between RETRYING, FAILED and DEAD_LETTER. RETRYING is claimable. There's a poison-pill guard (attempts past
+  `maxAttempts` after takeovers are dead-lettered), and the reconciler recovers lost retry wake-ups
+- Handlers get `attempt`. New `flaky` handler. `fail` is non-retryable unless `config.retryable: true`
+- Idempotent `POST /workflows/:id/run` through the `Idempotency-Key` header (unique partial index on the execution)
+
+**Bug found by the new tests**: when a task failed, the engine scheduled its retry into the Redis delayed set, but
+the id was still leased and a member, so dedupe dropped it, and the worker's `ack` then removed the membership.
+The retry was lost (only the reconciler could rescue it). The fix: `enqueueDelayed` moves a leased id from leases
+to delayed, and `ack` only clears membership if the lease still exists. Regression tests were added.
+
+**Tests**: 225 total, suite run twice with no flaky failures. Mutation check: removing jitter, retrying
+non-retryable errors, and removing the poison-pill guard were each caught.
+
+**Smoke-tested on the real server with 3 worker processes**: fan-out of six 1-second tasks finished in ~1.2 s
+wall-clock, 2 tasks per worker (local sanity check, not a benchmark); a flaky task completed on attempt 3; same
+Idempotency-Key twice gave the same execution and `Idempotent-Replayed: true`, and a different body gave 422;
+SIGTERM to a busy worker let its task finish before it exited.
+
+**Not built** (do not claim): distributed locks, pause/resume/cancel endpoints, heartbeats and a worker registry,
+Kafka, scheduled workflows, and the whole AI layer (Phases 11–23), plus Docker images for the app and Swagger.

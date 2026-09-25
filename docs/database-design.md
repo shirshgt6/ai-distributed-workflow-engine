@@ -43,9 +43,12 @@ MongoDB runs as a replica set (see ADR-002), so multi-document transactions are 
 | status | execution state machine (`src/workflow/states.js`) |
 | input, triggeredBy, startedAt, completedAt, error | |
 | taskCount | number of tasks in the run |
+| idempotencyKey, requestHash | client key + SHA-256 of canonical `{workflowId, input}`; `requestHash` is never returned by the API |
 | **pendingTasks** | tasks not yet finished (COMPLETED/FAILED/CANCELLED). Decremented with `$inc` in the same transaction that finishes a task. This is the write-skew fix: every completion writes this one document, so concurrent "last task" completions conflict and serialise |
 
-**Indexes:** `{ workflowId, createdAt: -1 }`, `{ ownerId, createdAt: -1 }`, `{ status }`.
+**Indexes:** `{ workflowId, createdAt: -1 }`, `{ ownerId, createdAt: -1 }`, `{ status }`, and
+`{ triggeredBy, idempotencyKey }` **unique, partial** (only documents that have a key). This gives idempotent run
+creation in the same insert as the run itself, so no separate IdempotencyRecord collection is needed.
 
 ## tasks (one task instance per execution)
 | Field | Notes |
@@ -55,13 +58,14 @@ MongoDB runs as a replica set (see ADR-002), so multi-document transactions are 
 | status | task state machine |
 | attempt, maxAttempts, baseDelayMs, timeoutMs | retry bookkeeping |
 | leaseOwner, **leaseToken**, leaseExpiresAt | lease + **fencing token** (incremented per claim, prevents ABA) |
-| output, error, readyAt, queuedAt, startedAt, completedAt | `readyAt` lets the reconciler find READY tasks nobody dispatched |
+| output, error, readyAt, retryAt, queuedAt, startedAt, completedAt | `readyAt` / `retryAt` let the reconciler find stranded READY tasks and lost retry wake-ups |
 
 **Indexes:**
 - `{ executionId, key }` unique: one task per key per run. It also makes task creation safe to retry.
 - `{ executionId, status }` serves "tasks of this run in state X".
 - `{ status, leaseExpiresAt }` serves the recovery sweeper's "RUNNING with an expired lease" query (Phase 10).
 - `{ status, readyAt }` serves the reconciler's "READY for longer than N seconds" query.
+- `{ status, retryAt }` serves the reconciler's "RETRYING and overdue" query.
 
 **`minimize: false`:** Mongoose drops empty objects on save by default, which silently changed handler outputs (`{ config: {} }` was stored as `{}`). Task config and output are user data and must round-trip exactly.
 
@@ -81,4 +85,4 @@ MongoDB runs as a replica set (see ADR-002), so multi-document transactions are 
 This is an append-only attempt history. It replaces Project 1's growing embedded `history[]` array. One is created per claim and closed as SUCCEEDED, FAILED or TIMED_OUT.
 
 ## Not yet created
-IdempotencyRecord, Worker, ApprovalRequest, AIExecution, Document, KnowledgeChunk and OutboxEvent. Each arrives in the phase that uses it.
+Worker (registry; Phase 10), ApprovalRequest, AIExecution, Document, KnowledgeChunk and OutboxEvent. Each arrives in the phase that uses it.
