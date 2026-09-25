@@ -10,7 +10,9 @@ import { TaskExecution } from "./models/taskExecution.model.js";
 import { createEngine } from "./workflow/engine.js";
 import { createTaskQueue } from "./queues/taskQueue.js";
 import { createQueueWorker } from "./workers/queueWorker.js";
-import { handlers } from "./handlers/index.js";
+import { handlers as builtinHandlers } from "./handlers/index.js";
+import { createAiHandlers } from "./handlers/ai.js";
+import { createProviderFromConfig } from "./ai/providers/index.js";
 import { Worker } from "./models/worker.model.js";
 import { createWorkerRegistry } from "./workers/registry.js";
 import { OutboxEvent } from "./models/outboxEvent.model.js";
@@ -42,6 +44,9 @@ async function main() {
   await redis.connect();
 
   const queue = createTaskQueue(redis);
+  // Built-in handlers + AI handlers (which receive the LLM provider).
+  const llm = createProviderFromConfig(config.llm);
+  const handlers = { ...builtinHandlers, ...createAiHandlers({ provider: llm, models: config.llm.models, logger }) };
   const engine = createEngine({
     models: { WorkflowExecution, Task, TaskExecution, OutboxEvent },
     enqueue: (item) => queue.enqueue(item.taskId),

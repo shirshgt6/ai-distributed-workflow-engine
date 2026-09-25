@@ -38,3 +38,17 @@ test("real embeddings: 768-dim vectors, and related texts are closer than unrela
   expect(cos(vectors[0], vectors[1])).toBeGreaterThan(cos(vectors[0], vectors[2]));
   console.log(`[real embeddings] refund~refund ${cos(vectors[0], vectors[1]).toFixed(3)} vs refund~weather ${cos(vectors[0], vectors[2]).toFixed(3)}`);
 }, 120_000);
+
+test("real classification + routing of a request", async () => {
+  const { classifyTask } = await import("../../src/ai/classifier.js");
+  const { routeTask } = await import("../../src/ai/router.js");
+  const r = await classifyTask({
+    provider,
+    model: MODEL,
+    request: "According to our company handbook, how many vacation days do new employees get?",
+    fallback: false,
+  });
+  const route = routeTask(r.classification, { small: MODEL, large: MODEL });
+  console.log(`[real classifier] ${JSON.stringify(r.classification)} (${r.attempts} attempt(s)) -> route ${route.mode}/${route.tier}`);
+  expect(["direct", "rag", "agent"]).toContain(route.mode);
+}, 180_000);

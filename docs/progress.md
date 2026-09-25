@@ -18,8 +18,8 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 12 | Scheduled workflows | ✅ |
 | 13 | LLM provider abstraction | ✅ |
 | 14 | Structured output + validation | ✅ |
-| 15 | AI task classification | ⬜ |
-| 16 | AI model routing | ⬜ |
+| 15 | AI task classification | ✅ |
+| 16 | AI model routing | ✅ |
 | 17 | RAG ingestion pipeline | ⬜ |
 | 18 | Qdrant retrieval | ⬜ |
 | 19 | LangChain.js integration | ⬜ |
@@ -266,3 +266,12 @@ prompt-injection delimiters; LLM config (`LLM_*`, `EMBEDDING_MODEL`); an opt-in 
 **Tests**: unit tests for validation and repair (malformed JSON, schema violation, exhaustion, stripped keys), provider HTTP
 mapping, error classification, timeout and key hygiene. The real Ollama suite passes (structured output, and embeddings where
 related texts are closer).
+
+## Phases 15–16 — AI classification + model routing ✅
+**Implemented**: `classifyTask` (structured and validated, prompt-versioned, with a heuristic fallback marked `source`);
+`routeTask` (4 deterministic rules); `ai.classify`, `ai.route` and `ai.generate` handlers wired into workers, with the LLM
+provider coming from config.
+**Tests**: 290 total. The router rule table, the classifier (injection delimiter, unreachable → heuristic, garbage →
+heuristic after repairs), and e2e runs classify→route→generate (the small vs large model actually answers, no double
+classification, a RAG route refused by generate, an LLM timeout retried and succeeding). Real model: classification plus routing.
+**Finding**: the small model missed a RAG case with v1; few-shot v2 fixed it for that query (3/3 runs). This isn't an evaluation.

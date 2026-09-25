@@ -22,4 +22,9 @@ export default [
     files: ["tests/**/*.js"],
     languageOptions: { globals: { ...globals.jest } },
   },
+  {
+    // Real-model tests print what the model actually returned, on purpose.
+    files: ["tests/llm/**/*.js"],
+    rules: { "no-console": "off" },
+  },
 ];
