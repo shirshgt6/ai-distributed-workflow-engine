@@ -19,6 +19,7 @@ import { createTaskQueue } from "../../src/queues/taskQueue.js";
 import { createQueueWorker } from "../../src/workers/queueWorker.js";
 import { createWorkerRegistry, listWorkers } from "../../src/workers/registry.js";
 import { Worker } from "../../src/models/worker.model.js";
+import { OutboxEvent } from "../../src/models/outboxEvent.model.js";
 import { createExecutionService } from "../../src/services/execution.service.js";
 import { handlers } from "../../src/handlers/index.js";
 
@@ -53,7 +54,7 @@ export function createTestStack({ concurrency = 4, leaseMs = 2000, workerId = "t
   const authService = createAuthService({ User, tokens, bcryptCost: BCRYPT_COST });
   const workflowService = createWorkflowService({ Workflow });
   const engine = createEngine({
-    models: { WorkflowExecution, Task, TaskExecution },
+    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent },
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,

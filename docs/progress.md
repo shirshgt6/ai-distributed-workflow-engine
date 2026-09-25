@@ -14,7 +14,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 8 | Concurrency + retries + backoff | ✅ |
 | 9 | Idempotency + distributed locks | ✅ |
 | 10 | Worker heartbeat + crash recovery | ✅ |
-| 11 | Kafka event architecture (transactional outbox) | ⬜ |
+| 11 | Kafka event architecture (transactional outbox) | ✅ |
 | 12 | Scheduled workflows | ⬜ |
 | 13 | LLM provider abstraction | ⬜ |
 | 14 | Structured output + validation | ⬜ |
@@ -235,3 +235,14 @@ renewal (cooperative cancel).
 fail, pause/resume semantics, cancel vs completion race (5 rounds), and HTTP cancel/pause/resume/authorization.
 **Mutation check**: lock release without the token check, and cancel skipping RUNNING tasks, were both caught.
 **Not built**: Redlock or multi-node locking (single Redis, by design); the lock is used by the scheduler (Phase 12).
+
+## Phase 11 — Kafka lifecycle events (transactional outbox) ✅
+**Implemented**: `OutboxEvent` written in the same transaction as every state change (11 event types);
+`src/events/relay.js` (publish, then mark; leader-elected with the Redis lock and run inside workers);
+`src/events/kafka.js` (kafkajs, idempotent producer, explicit 3-partition topic, key = executionId);
+`src/consumers/analytics.js` + `analyticsProcessor` (idempotent: dedupe row and effect in one transaction);
+Kafka (KRaft, host port 9095) in docker compose.
+**Tests**: 252 total. New: event sequence, rollback leaves no event, duplicate report emits no event, pause/resume/cancel
+events, relay marking and Kafka-down behaviour, relay leader election, idempotent consumer (duplicate + 5-way race), and a
+**real Kafka round trip** with a forced duplicate publish (8 messages → 4 applied, 4 skipped).
+**Honest limits**: at-least-once, not exactly-once; `task.started` is not transactional; single Kafka broker.
