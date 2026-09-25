@@ -98,3 +98,15 @@ and if it's wrong, shows the model its mistake and asks it to fix it (repair), u
 spice-level box only accepts low/medium/high, fix it". After 3 wrong forms, the order is rejected rather than guessed.
 **Remember:** JSON mode guarantees syntax, not meaning, so always validate. Depend on interfaces, not vendors. Delimiters
 reduce prompt injection; they don't eliminate it.
+
+## Phases 15–16: AI classification + model routing
+**Built:** an LLM reads a request and fills a validated form: task type, complexity, needs our documents (RAG)?, needs
+tools (agent)?. Simple rules then pick the pipeline and model: tools → agent; documents → RAG; hard → big model;
+everything else → small model. If the LLM is down, a keyword rule-book classifies instead, and says so.
+**Real life:** the restaurant's **receptionist** looks at each order and stamps it: "simple tea → junior cook", "5-course
+wedding menu → head chef", "customer asks what's in our secret masala → check the **recipe book** first (RAG)", "customer
+asks where their delivery is → someone must **phone the rider** (agent/tools)". The stamps follow a **fixed rulebook**
+on the wall (routing rules), so the same order always goes to the same place and anyone can explain why. If the receptionist
+is on leave, a simple checklist ("does the order mention 'recipe'?") does the job, badly but visibly.
+**Remember:** rules are cheap, fast, testable and explainable, and an LLM router is none of these. Send the common path to
+the small model and escalate only when needed. Few-shot examples help small models, but that isn't an accuracy measurement.

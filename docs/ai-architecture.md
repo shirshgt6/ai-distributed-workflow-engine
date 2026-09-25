@@ -1,6 +1,6 @@
 # AI architecture
 
-> Built so far: **provider abstraction (Phase 13)** and **structured output + validation + repair (Phase 14)**.
+> Built so far: provider abstraction (13), structured output (14), **classification (15)** and **model routing (16)**.
 > Later sections are added as phases land.
 
 ## Provider abstraction (`src/ai/providers/`)
@@ -41,3 +41,34 @@ are schema validation and (Phase 20) allowlisted, permission-checked tools in co
 ## Verified against a real model (`npm run test:llm`)
 - qwen2.5:0.5b returned schema-valid `{"sentiment":"positive"}` on the first attempt.
 - nomic-embed-text: cosine("refund for my order", "refund policy") = 0.777 vs ("refund…", "weather") = 0.369 (one run on a laptop).
+
+## Classification (`src/ai/classifier.js`), Phase 15
+The request (wrapped as `<user_input>`) goes through `generateStructured` into a validated
+`{ taskType, complexity, requiresRAG, requiresAgent, recommendedModel, rationale }`.
+- **Prompt versioning:** `classifier.v2` is recorded with each result.
+- **Fallback:** if the model is unreachable or keeps returning invalid output after repairs, a deterministic keyword
+  heuristic is used and the result is marked `source: "heuristic"` with a `fallbackReason`. It never falls back silently.
+- **Real-model finding:** with `classifier.v1`, qwen2.5:0.5b classified "According to our company handbook, how many
+  vacation days...?" as `requiresRAG: false`. Adding three few-shot examples (`v2`) gave `requiresRAG: true` in 3/3 runs.
+  That's a single-query check, **not an accuracy evaluation**. A 0.5B model is weak at classification; production would
+  use a larger model and an evaluation set.
+
+## Routing (`src/ai/router.js`), Phase 16
+Deterministic rules (first match wins). A second LLM call is deliberately avoided, since rules are free, instant, testable and explainable:
+
+| Rule | Condition | Route |
+|---|---|---|
+| requires-tools | `requiresAgent` | **agent**, large |
+| requires-knowledge | `requiresRAG` | **rag**, small if low complexity, else large |
+| high-complexity | complexity high or taskType reasoning | **direct**, large |
+| default-small | everything else | **direct**, small (the model can't force "large" on a low-complexity task) |
+
+Cost, latency and quality: the common, simple path uses the cheaper, faster model, and the classification decides when to escalate.
+Locally both tiers point at `qwen2.5:0.5b` (only one chat model is installed). The tier names and routing are real, but
+there's no cost difference to measure yet.
+
+## AI task handlers (`src/handlers/ai.js`)
+`ai.classify`, `ai.route` (reuses a parent's classification, so there's no second LLM call), and `ai.generate`
+(uses the parent route's model, and refuses non-direct routes with a clear non-retryable error). They're ordinary workflow
+tasks, so dependencies, retries (a `ProviderError.retryable` timeout is retried with backoff), timeouts, cancellation and
+events all apply unchanged.

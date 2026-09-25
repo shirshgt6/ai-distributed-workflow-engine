@@ -21,7 +21,9 @@ import { createWorkerRegistry, listWorkers } from "../../src/workers/registry.js
 import { Worker } from "../../src/models/worker.model.js";
 import { OutboxEvent } from "../../src/models/outboxEvent.model.js";
 import { createExecutionService } from "../../src/services/execution.service.js";
-import { handlers } from "../../src/handlers/index.js";
+import { handlers as builtinHandlers } from "../../src/handlers/index.js";
+import { createAiHandlers } from "../../src/handlers/ai.js";
+import { createMockProvider } from "../../src/ai/providers/mock.js";
 
 export const MONGO_URI =
   process.env.MONGO_URI_TEST ?? "mongodb://localhost:27018/workflow_engine_test?directConnection=true";
@@ -48,7 +50,16 @@ export function createTestApp() {
  * worker, for end-to-end tests. `await stack.start()` in beforeAll and
  * `await stack.stop()` in afterAll.
  */
-export function createTestStack({ concurrency = 4, leaseMs = 2000, workerId = "test-worker", withRegistry = false } = {}) {
+export const TEST_MODELS = { small: "mock-small", large: "mock-large", embedding: "mock-embed" };
+
+export function createTestStack({
+  concurrency = 4,
+  leaseMs = 2000,
+  workerId = "test-worker",
+  withRegistry = false,
+  llm = createMockProvider(),
+} = {}) {
+  const handlers = { ...builtinHandlers, ...createAiHandlers({ provider: llm, models: TEST_MODELS, logger }) };
   const redis = createRedisClient(REDIS_URL, logger, { name: "test-stack" });
   const queue = createTaskQueue(redis, { prefix: `test:${randomUUID()}` });
   const authService = createAuthService({ User, tokens, bcryptCost: BCRYPT_COST });
