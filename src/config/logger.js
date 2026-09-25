@@ -13,6 +13,7 @@ const REDACT_PATHS = [
   "*.accessToken",
   "*.refreshToken",
   "*.apiKey",
+  "*.LLM_API_KEY",
 ];
 
 /**

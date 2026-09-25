@@ -48,6 +48,14 @@ const envSchema = z.object({
   KAFKA_BROKERS: z.string().default("localhost:9095"),
   KAFKA_TOPIC: z.string().regex(/^[A-Za-z0-9._-]+$/).default("workflow-events"),
   OUTBOX_RELAY_INTERVAL_MS: z.coerce.number().int().min(50).default(500),
+  // LLM (Phase 13+). Any OpenAI-compatible endpoint; default = local Ollama.
+  LLM_PROVIDER: z.enum(["ollama", "openai-compatible", "mock"]).default("ollama"),
+  LLM_BASE_URL: z.string().url().default("http://localhost:11434"),
+  LLM_API_KEY: z.string().optional(), // not needed for Ollama; never logged
+  LLM_MODEL_SMALL: z.string().default("qwen2.5:0.5b"),
+  LLM_MODEL_LARGE: z.string().default("qwen2.5:0.5b"),
+  EMBEDDING_MODEL: z.string().default("nomic-embed-text"),
+  LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(60_000),
   // Scheduler (Phase 12): how often the leader looks for due cron schedules.
   SCHEDULER_TICK_MS: z.coerce.number().int().min(100).default(5000),
   RECONCILE_STALE_MS: z.coerce.number().int().min(100).default(10_000),
@@ -118,6 +126,13 @@ export function loadConfig(source = process.env) {
       relayIntervalMs: env.OUTBOX_RELAY_INTERVAL_MS,
     }),
     scheduler: Object.freeze({ tickMs: env.SCHEDULER_TICK_MS }),
+    llm: Object.freeze({
+      provider: env.LLM_PROVIDER,
+      baseUrl: env.LLM_BASE_URL,
+      apiKey: env.LLM_API_KEY,
+      models: Object.freeze({ small: env.LLM_MODEL_SMALL, large: env.LLM_MODEL_LARGE, embedding: env.EMBEDDING_MODEL }),
+      timeoutMs: env.LLM_TIMEOUT_MS,
+    }),
     reconciler: Object.freeze({ intervalMs: env.RECONCILE_INTERVAL_MS, staleMs: env.RECONCILE_STALE_MS }),
   });
 }

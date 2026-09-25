@@ -86,3 +86,15 @@ refused (idempotency). If the kitchen was **closed for 5 hours**, nobody cooks 5
 continue normally (no backfill).
 **Remember:** the lock is an optimization, and the idempotency key is the guarantee. Start the run first, then advance
 the schedule, so a crash in between can only cause a deduplicated retry, never a missed run.
+
+## Phases 13–14: LLM provider abstraction + structured output
+**Built:** one **interface** for talking to any LLM (`chat`, `embed`). Behind it sit Ollama (a real local model) and a
+Mock (for tests). There's a `generateStructured` helper: it asks the model for JSON matching a schema, validates it with zod,
+and if it's wrong, shows the model its mistake and asks it to fix it (repair), up to 2 times.
+**Real life:** the kitchen hires **cooks from any agency** (Ollama, OpenAI...) through a **standard job description**
+("can make roti, can make dal"). The head chef never cares which agency a cook came from, and on test days a
+**practice dummy cook** (Mock) follows a script. **Structured output**: the order form has fixed boxes (dish name, quantity
+1–10, spice level low/medium/high). If a new cook writes "spice level: very tasty", the form is handed back: "the
+spice-level box only accepts low/medium/high, fix it". After 3 wrong forms, the order is rejected rather than guessed.
+**Remember:** JSON mode guarantees syntax, not meaning, so always validate. Depend on interfaces, not vendors. Delimiters
+reduce prompt injection; they don't eliminate it.
