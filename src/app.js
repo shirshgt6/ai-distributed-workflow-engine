@@ -9,6 +9,7 @@ import { createAuthenticate } from "./middleware/authenticate.js";
 import { createWorkflowRouter } from "./routes/workflow.routes.js";
 import { createExecutionRouter } from "./routes/execution.routes.js";
 import { createAdminRouter } from "./routes/admin.routes.js";
+import { createKnowledgeRouter } from "./routes/knowledge.routes.js";
 
 /**
  * Build the Express app WITHOUT starting a server or connecting to anything.
@@ -26,7 +27,8 @@ import { createAdminRouter } from "./routes/admin.routes.js";
  *   auth?: { authService: object, tokens: object },
  *   workflowService?: object,
  *   executionService?: object,
- *   admin?: { listWorkers: () => Promise<object[]> }
+ *   admin?: { listWorkers: () => Promise<object[]> },
+ *   knowledge?: { rag: object, KnowledgeDocument: object }
  * }} deps
  *   auth / workflowService are optional so tests that only exercise
  *   health/errors don't need to build the whole stack. Workflow routes need
@@ -41,6 +43,7 @@ export function createApp({
   workflowService,
   executionService,
   admin,
+  knowledge,
 }) {
   const app = express();
 
@@ -91,6 +94,9 @@ export function createApp({
     }
     if (admin) {
       app.use(createAdminRouter({ authenticate, ...admin }));
+    }
+    if (knowledge) {
+      app.use(createKnowledgeRouter({ authenticate, ...knowledge }));
     }
   }
 

@@ -110,3 +110,19 @@ on the wall (routing rules), so the same order always goes to the same place and
 is on leave, a simple checklist ("does the order mention 'recipe'?") does the job, badly but visibly.
 **Remember:** rules are cheap, fast, testable and explainable, and an LLM router is none of these. Send the common path to
 the small model and escalate only when needed. Few-shot examples help small models, but that isn't an accuracy measurement.
+
+## Phases 17–19: RAG (documents → chunks → vectors → grounded answers)
+**Built:** upload a text document. It's cleaned, split into overlapping chunks (LangChain splitter), turned into vectors
+(nomic-embed-text), and stored in **Qdrant** (vectors) plus MongoDB (text). A question is turned into a vector, the nearest
+chunks **of that user only** are found, and the LLM must answer **only from them, citing** `[S1]`… If it cites a source
+that wasn't retrieved, the answer is rejected and repaired. If nothing relevant was found, it says "not enough information"
+without even calling the LLM.
+**Real life:** the kitchen's **recipe library**. Every recipe book is cut into index cards (chunks), with a little overlap
+so no instruction is cut in half. Each card gets a **"flavour fingerprint"** (embedding): similar dishes have similar
+fingerprints. When a customer asks "is the paneer gluten-free?", the librarian fetches the 4 cards with the closest
+fingerprints, **only from this restaurant's own books** (owner filter), and the cook must answer **reading from those cards
+and naming them**: "card #2 says…". If the cook quotes "card #9", which was never handed over, the answer is sent back. If no
+card is relevant, the honest answer is "we don't know", never a guess.
+**Remember:** RAG reduces hallucination by grounding plus citations plus refusal, but doesn't eliminate it. Filter tenants
+inside the vector query. One collection per embedding model. Use libraries for utilities (the splitter) and your own code for
+control flow. Small models are weak at citing, so validate and refuse.

@@ -24,10 +24,14 @@ import { createExecutionService } from "../../src/services/execution.service.js"
 import { handlers as builtinHandlers } from "../../src/handlers/index.js";
 import { createAiHandlers } from "../../src/handlers/ai.js";
 import { createMockProvider } from "../../src/ai/providers/mock.js";
+import { createVectorStore } from "../../src/ai/rag/vectorStore.js";
+import { createRagPipeline } from "../../src/ai/rag/pipeline.js";
+import { KnowledgeDocument, KnowledgeChunk } from "../../src/models/knowledge.model.js";
 
 export const MONGO_URI =
   process.env.MONGO_URI_TEST ?? "mongodb://localhost:27018/workflow_engine_test?directConnection=true";
 export const REDIS_URL = process.env.REDIS_URL_TEST ?? "redis://localhost:6380";
+export const QDRANT_URL = process.env.QDRANT_URL_TEST ?? "http://localhost:6333";
 export const PASSWORD = "s3cure-enough-pass";
 const BCRYPT_COST = 4;
 
@@ -58,8 +62,11 @@ export function createTestStack({
   workerId = "test-worker",
   withRegistry = false,
   llm = createMockProvider(),
+  ragOptions = {},
 } = {}) {
-  const handlers = { ...builtinHandlers, ...createAiHandlers({ provider: llm, models: TEST_MODELS, logger }) };
+  const vectorStore = createVectorStore({ url: QDRANT_URL, prefix: `test_${randomUUID().slice(0, 8)}` });
+  const rag = createRagPipeline({ provider: llm, vectorStore, models: TEST_MODELS, KnowledgeDocument, KnowledgeChunk, logger, minScore: 0.1, ...ragOptions });
+  const handlers = { ...builtinHandlers, ...createAiHandlers({ provider: llm, models: TEST_MODELS, logger, rag }) };
   const redis = createRedisClient(REDIS_URL, logger, { name: "test-stack" });
   const queue = createTaskQueue(redis, { prefix: `test:${randomUUID()}` });
   const authService = createAuthService({ User, tokens, bcryptCost: BCRYPT_COST });
@@ -93,9 +100,12 @@ export function createTestStack({
     workflowService,
     executionService,
     admin: { listWorkers: () => listWorkers({ Worker, redis }) },
+    knowledge: { rag, KnowledgeDocument },
   });
 
   return {
+    rag,
+    vectorStore,
     app,
     engine,
     queue,
@@ -108,6 +118,7 @@ export function createTestStack({
     },
     async stop() {
       await worker.stop();
+      await vectorStore.deleteCollection(TEST_MODELS.embedding, llm.dims ?? 64);
       await redis.del(...Object.values(queue.keys));
       await redis.quit();
     },

@@ -5,9 +5,10 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phases 1–14 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
+> **Status: Phases 1–19 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
 > queue (retries, dead-lettering, crash recovery, heartbeats, pause/cancel, cron schedules, Kafka events). The AI layer has
-> started (provider abstraction + validated structured output); see [docs/ai-architecture.md](docs/ai-architecture.md).
+> provider abstraction, validated structured output, classification, model routing and RAG with Qdrant; see
+> [docs/ai-architecture.md](docs/ai-architecture.md) and [docs/rag.md](docs/rag.md).
 > See [docs/progress.md](docs/progress.md)
 > for exactly what is implemented, and [ARCHITECTURE.md](ARCHITECTURE.md)
 > for the target design.
@@ -40,6 +41,8 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
 - **Heartbeats + worker registry** (`GET /workers`), **pause/resume/cancel** (`POST /executions/:id/pause|resume|cancel`)
 - **Kafka lifecycle events** via a transactional outbox, with an idempotent analytics consumer (`npm run consumer:analytics`),
   see [docs/kafka.md](docs/kafka.md)
+- **AI tasks**: `ai.classify`, `ai.route`, `ai.generate`, `ai.rag` (local Ollama, or any OpenAI-compatible API)
+- **RAG**: `POST /documents` (chunk + embed + Qdrant), owner-isolated retrieval, cited and validated answers
 - **Cron schedules** (`PUT /workflows/:id/schedule`): leader-elected scheduler, one run per slot guaranteed by idempotency keys
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)

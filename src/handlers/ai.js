@@ -7,16 +7,16 @@ import { NonRetryableError } from "../workers/retry.js";
 
 /**
  * AI task handlers. Each is an ordinary workflow task: it gets
- * { config, input, parents, attempt, signal } and returns JSON, so AI steps
+ * { config, input, parents, attempt, ownerId, signal } and returns JSON, so AI steps
  * compose with every engine feature (dependencies, retries, timeouts,
  * cancellation, events) without special cases.
  *
  * ProviderError.retryable flows straight into the engine's retry decision:
  * an Ollama timeout is retried with backoff, a 400 fails immediately.
  *
- * @param {{ provider, models: { small: string, large: string, embedding: string }, logger }} deps
+ * @param {{ provider, models: { small: string, large: string, embedding: string }, logger, rag? }} deps
  */
-export function createAiHandlers({ provider, models }) {
+export function createAiHandlers({ provider, models, rag }) {
   /** The request text: config.text, else input[config.inputField ?? "text"]. */
   function requestText({ config, input }) {
     const text = config.text ?? input?.[config.inputField ?? "text"];
@@ -40,6 +40,18 @@ export function createAiHandlers({ provider, models }) {
       const fromParent = Object.values(ctx.parents ?? {}).find((p) => p?.classification);
       const classified = fromParent ?? (await classifyTask({ provider, model: models.small, request: requestText(ctx), signal: ctx.signal }));
       return { classification: classified.classification, source: classified.source, route: routeTask(classified.classification, models) };
+    },
+
+    /**
+     * Answer from the run OWNER's knowledge base with citations (RAG).
+     * Model: parent route's model if it routed to "rag", else config.tier, else small.
+     * Output: { answer, citations[], grounded, retrieved, usage, model }.
+     */
+    "ai.rag": async (ctx) => {
+      if (!rag) throw new NonRetryableError("RAG is not configured on this worker");
+      const route = Object.values(ctx.parents ?? {}).find((p) => p?.route)?.route;
+      const model = route?.mode === "rag" ? route.model : (models[ctx.config.tier ?? "small"] ?? models.small);
+      return rag.answer({ ownerId: ctx.ownerId, question: requestText(ctx), model, signal: ctx.signal });
     },
 
     /**
