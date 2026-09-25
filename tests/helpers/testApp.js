@@ -129,5 +129,6 @@ export function as(app, token) {
     post: (url) => withAuth(request(app).post(url)),
     put: (url) => withAuth(request(app).put(url)),
     patch: (url) => withAuth(request(app).patch(url)),
+    delete: (url) => withAuth(request(app).delete(url)),
   };
 }

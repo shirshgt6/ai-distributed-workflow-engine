@@ -48,6 +48,8 @@ const envSchema = z.object({
   KAFKA_BROKERS: z.string().default("localhost:9095"),
   KAFKA_TOPIC: z.string().regex(/^[A-Za-z0-9._-]+$/).default("workflow-events"),
   OUTBOX_RELAY_INTERVAL_MS: z.coerce.number().int().min(50).default(500),
+  // Scheduler (Phase 12): how often the leader looks for due cron schedules.
+  SCHEDULER_TICK_MS: z.coerce.number().int().min(100).default(5000),
   RECONCILE_STALE_MS: z.coerce.number().int().min(100).default(10_000),
 }).refine((env) => env.JWT_ACCESS_SECRET !== env.JWT_REFRESH_SECRET, {
   // Same secret for both would let a refresh token pass access-token
@@ -115,6 +117,7 @@ export function loadConfig(source = process.env) {
       topic: env.KAFKA_TOPIC,
       relayIntervalMs: env.OUTBOX_RELAY_INTERVAL_MS,
     }),
+    scheduler: Object.freeze({ tickMs: env.SCHEDULER_TICK_MS }),
     reconciler: Object.freeze({ intervalMs: env.RECONCILE_INTERVAL_MS, staleMs: env.RECONCILE_STALE_MS }),
   });
 }

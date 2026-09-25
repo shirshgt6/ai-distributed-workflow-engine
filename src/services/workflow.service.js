@@ -1,6 +1,7 @@
 import { ownerScope } from "../auth/ownership.js";
 import { ConflictError, NotFoundError, ValidationError } from "../utils/errors.js";
 import { validateDag } from "../workflow/dag.js";
+import { assertValidCron, nextRunAfter } from "../scheduler/cron.js";
 
 /**
  * Reject a definition whose task graph is not a valid DAG (cycle, unknown
@@ -76,6 +77,29 @@ export function createWorkflowService({ Workflow }) {
      * operation. No lock is held while the user edits for minutes in a UI;
      * conflicts are detected at save time instead.
      */
+    /** Attach / replace the cron schedule. The first run is the next slot after now. */
+    async setSchedule(user, id, { cron, timezone = "UTC", enabled = true, input = {} }) {
+      assertValidCron(cron, timezone);
+      const schedule = { cron, timezone, enabled, input, nextRunAt: nextRunAfter(cron, new Date(), timezone), lastRunAt: null, lastError: null };
+      const workflow = await Workflow.findOneAndUpdate(
+        { _id: id, ...ownerScope(user) },
+        { $set: { schedule } },
+        { returnDocument: "after" }
+      );
+      if (!workflow) throw notFound();
+      return workflow;
+    },
+
+    async clearSchedule(user, id) {
+      const workflow = await Workflow.findOneAndUpdate(
+        { _id: id, ...ownerScope(user) },
+        { $unset: { schedule: "" } },
+        { returnDocument: "after" }
+      );
+      if (!workflow) throw notFound();
+      return workflow;
+    },
+
     async update(user, id, { version, name, description, tasks }) {
       assertValidGraph(tasks);
       const updated = await Workflow.findOneAndUpdate(

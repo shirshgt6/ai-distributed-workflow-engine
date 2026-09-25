@@ -62,6 +62,8 @@ Only implemented endpoints are listed. An OpenAPI/Swagger spec comes in Phase 27
 |---|---|---|---|---|
 | POST | `/workflows` | `workflow:create` | `{ name, description?, tasks[] }` | 201 `{ workflow }` + `Location` header, `version: 1` |
 | POST | `/workflows/validate` | `workflow:create` | same body as create | 200 `{ valid, errors[], order[], levels[][], criticalPathLength }`, nothing saved (200 even when `valid:false`) |
+| PUT | `/workflows/:id/schedule` | `workflow:create` | `{ cron (5 fields), timezone?, enabled?, input? }` | 200 `{ workflow }` with `schedule.nextRunAt`; 400 `INVALID_CRON` |
+| DELETE | `/workflows/:id/schedule` | `workflow:create` | — | 200 `{ workflow }` without a schedule |
 | GET | `/workflows` | `workflow:read` | `?limit=1..100 (20)&page=1..` | 200 `{ items, page, limit, total }` (own only; admin: all) |
 | GET | `/workflows/:id` | `workflow:read` | — | 200 `{ workflow }`; 404 if missing **or not yours** |
 | PUT | `/workflows/:id` | `workflow:create` | `{ name, description?, tasks[], version }` | 200, `version` + 1; **409 `VERSION_CONFLICT`** if `version` is stale |

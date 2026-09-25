@@ -32,6 +32,16 @@ export function createWorkflowController(workflowService) {
       res.status(200).json({ workflow });
     },
 
+    async setSchedule(req, res) {
+      const workflow = await workflowService.setSchedule(req.user, req.valid.params.id, req.valid.body);
+      res.status(200).json({ workflow });
+    },
+
+    async clearSchedule(req, res) {
+      const workflow = await workflowService.clearSchedule(req.user, req.valid.params.id);
+      res.status(200).json({ workflow });
+    },
+
     async update(req, res) {
       const workflow = await workflowService.update(req.user, req.valid.params.id, req.valid.body);
       res.status(200).json({ workflow });

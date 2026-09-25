@@ -40,6 +40,7 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
 - **Heartbeats + worker registry** (`GET /workers`), **pause/resume/cancel** (`POST /executions/:id/pause|resume|cancel`)
 - **Kafka lifecycle events** via a transactional outbox, with an idempotent analytics consumer (`npm run consumer:analytics`),
   see [docs/kafka.md](docs/kafka.md)
+- **Cron schedules** (`PUT /workflows/:id/schedule`): leader-elected scheduler, one run per slot guaranteed by idempotency keys
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)
 

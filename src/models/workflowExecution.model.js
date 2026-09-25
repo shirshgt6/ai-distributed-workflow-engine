@@ -33,6 +33,7 @@ const workflowExecutionSchema = new Schema(
     // fresh data, sees 0, and completes the execution.
     pendingTasks: { type: Number, required: true },
     triggeredBy: { type: Schema.Types.ObjectId, ref: "User" },
+    trigger: { type: String, enum: ["manual", "schedule"], default: "manual" },
     // IDEMPOTENCY: the client's Idempotency-Key header and a hash of the
     // request it came with. Stored ON the execution, and protected by a
     // unique index, so "create the run" and "remember the key" happen in the

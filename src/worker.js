@@ -17,6 +17,8 @@ import { OutboxEvent } from "./models/outboxEvent.model.js";
 import { createLock } from "./queues/lock.js";
 import { createOutboxRelay, createRelayRunner } from "./events/relay.js";
 import { createKafkaPublisher } from "./events/kafka.js";
+import { Workflow } from "./models/workflow.model.js";
+import { createScheduler } from "./scheduler/scheduler.js";
 
 // WORKER PROCESS ENTRYPOINT:  npm run worker
 //
@@ -71,6 +73,16 @@ async function main() {
   });
   await worker.start();
 
+  // CRON SCHEDULER: every worker runs one; only the "scheduler" lock holder
+  // ticks. Duplicate starts are deduped by per-slot idempotency keys.
+  const scheduler = createScheduler({
+    Workflow,
+    engine,
+    lock: createLock(redis, "scheduler", { ttlMs: Math.max(10_000, config.scheduler.tickMs * 3) }),
+    logger,
+  });
+  scheduler.start(config.scheduler.tickMs);
+
   // OUTBOX RELAY: every worker runs one, but only the holder of the
   // "outbox-relay" lock publishes (leader election). If Kafka is down, events
   // simply wait in MongoDB; task execution is unaffected.
@@ -121,6 +133,7 @@ async function main() {
 
     clearInterval(reconcileTimer);
     await worker.stop();
+    await scheduler.stop();
     if (relayRunner) await relayRunner.stop();
     await publisher.disconnect().catch(() => {});
     await Promise.allSettled([disconnectMongo(), redis.quit()]);
