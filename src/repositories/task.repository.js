@@ -32,24 +32,55 @@ export async function transitionTask(taskId, from, to, { set = {}, inc, where = 
 }
 
 /**
- * A worker claims a QUEUED task: QUEUED -> RUNNING, in ONE atomic update that
- * also increments `attempt` and the fencing `leaseToken`.
+ * A worker claims a task: -> RUNNING, in ONE atomic update that also
+ * increments `attempt`, increments the fencing `leaseToken`, and sets a
+ * lease deadline. Claimable when the task is either:
  *
- * Returns the updated task (with the NEW leaseToken the worker must present
- * when it reports the result), or null if the task is no longer QUEUED —
- * cancelled, or already claimed by someone else. null means "skip it".
+ *   QUEUED                              (the normal case), or
+ *   RUNNING with an EXPIRED lease       (TAKEOVER: the previous worker died
+ *                                        or hung past timeout + grace)
+ *
+ * A takeover is logically RUNNING -> QUEUED -> RUNNING done in one step; the
+ * new leaseToken fences off any late report from the dead attempt.
+ *
+ * Lease maths uses MongoDB's clock ($$NOW), not this process's clock, so
+ * workers with skewed clocks agree on whether a lease has expired.
+ * leaseExpiresAt = now + task.timeoutMs + leaseGraceMs: a healthy worker's
+ * handler is stopped by its timeout well before the lease runs out.
+ *
+ * Returns the updated task (carrying the NEW leaseToken the worker must
+ * present when reporting), or null: already running elsewhere with a live
+ * lease, finished, or cancelled. null means "skip it".
  *
  * @param {import('mongoose').Types.ObjectId|string} taskId
  * @param {string} workerId
+ * @param {{ leaseGraceMs: number }} options
  */
-export async function claimQueuedTask(taskId, workerId) {
+export async function claimTask(taskId, workerId, { leaseGraceMs }) {
   assertTransition("task", TASK_STATUS.QUEUED, TASK_STATUS.RUNNING);
+  assertTransition("task", TASK_STATUS.RUNNING, TASK_STATUS.QUEUED); // takeover path
   return Task.findOneAndUpdate(
-    { _id: taskId, status: TASK_STATUS.QUEUED },
     {
-      $set: { status: TASK_STATUS.RUNNING, leaseOwner: workerId, startedAt: new Date() },
-      $inc: { attempt: 1, leaseToken: 1 },
+      _id: taskId,
+      $or: [
+        { status: TASK_STATUS.QUEUED },
+        { status: TASK_STATUS.RUNNING, $expr: { $lt: ["$leaseExpiresAt", "$$NOW"] } },
+      ],
     },
-    { returnDocument: "after" }
+    // An aggregation-pipeline update, so new values can be computed from the
+    // document's own fields ($timeoutMs) and the server clock ($$NOW).
+    [
+      {
+        $set: {
+          status: { $literal: TASK_STATUS.RUNNING },
+          leaseOwner: { $literal: workerId },
+          startedAt: "$$NOW",
+          attempt: { $add: ["$attempt", 1] },
+          leaseToken: { $add: ["$leaseToken", 1] },
+          leaseExpiresAt: { $add: ["$$NOW", { $add: ["$timeoutMs", leaseGraceMs] }] },
+        },
+      },
+    ],
+    { returnDocument: "after", updatePipeline: true }
   );
 }

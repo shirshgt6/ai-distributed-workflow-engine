@@ -9,14 +9,18 @@ import { Task } from "../../src/models/task.model.js";
 import { TaskExecution } from "../../src/models/taskExecution.model.js";
 import { EXECUTION_STATUS as E, TASK_STATUS as T } from "../../src/workflow/states.js";
 import { MONGO_URI, logger } from "../helpers/testApp.js";
+import { sleep } from "../../src/handlers/index.js";
 
 let enqueued = [];
+let redisDown = false; // flip to simulate the queue being unreachable
 const engine = createEngine({
   models: { WorkflowExecution, Task, TaskExecution },
   enqueue: (item) => {
+    if (redisDown) throw new Error("connect ECONNREFUSED (simulated)");
     enqueued.push(item.key);
   },
   logger,
+  leaseGraceMs: 50, // running lease = task.timeoutMs + 50ms (short, for takeover tests)
 });
 
 const ownerId = new mongoose.Types.ObjectId();
@@ -60,6 +64,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   enqueued = [];
+  redisDown = false;
   await Promise.all([WorkflowExecution.deleteMany({}), Task.deleteMany({}), TaskExecution.deleteMany({})]);
 });
 
@@ -235,17 +240,19 @@ describe("failure (fail-fast)", () => {
   });
 });
 
-describe("recovery", () => {
-  test("reconciler dispatches READY tasks that were never dispatched (crash after commit)", async () => {
+describe("reconciler (MongoDB is the truth, Redis is made to agree)", () => {
+  const old = () => new Date(Date.now() - 60_000);
+
+  test("dispatches READY tasks that were never dispatched (crash after commit)", async () => {
     const { _id } = await engine.startExecution({ workflow: diamond() });
     // Simulate: "A completed, B became READY, then the process died before dispatch".
-    await Task.updateOne({ executionId: _id, key: "B" }, { $set: { status: T.READY, readyAt: new Date(Date.now() - 60_000) } });
+    await Task.updateOne({ executionId: _id, key: "B" }, { $set: { status: T.READY, readyAt: old() } });
     await Task.updateOne({ executionId: _id, key: "C" }, { $set: { status: T.READY, readyAt: new Date() } }); // fresh
     enqueued = [];
 
-    const dispatched = await engine.reconcileStuckReady({ staleMs: 10_000 });
+    const counts = await engine.reconcile({ staleMs: 10_000 });
 
-    expect(dispatched).toBe(1);
+    expect(counts.ready).toBe(1);
     expect(enqueued).toEqual(["B"]); // the fresh one is left alone
     expect((await taskByKey(_id, "B")).status).toBe(T.QUEUED);
   });
@@ -254,20 +261,65 @@ describe("recovery", () => {
     const { _id } = await engine.startExecution({ workflow: diamond() });
     await Task.updateOne({ executionId: _id, key: "B" }, { $set: { status: T.READY, readyAt: new Date(0) } });
     enqueued = [];
-    await Promise.all([engine.reconcileStuckReady({ staleMs: 1 }), engine.dispatchReady(_id)]);
+    await Promise.all([engine.reconcile({ staleMs: 1 }), engine.dispatchReady(_id)]);
     expect(enqueued.filter((k) => k === "B")).toHaveLength(1);
   });
 
-  test("after a restart, QUEUED/RUNNING orphans are dispatched again with a new fencing token", async () => {
-    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A"), def("B")) });
-    const a = await start(_id, "A"); // A RUNNING, B QUEUED — then "the process dies"
+  test("Redis down during dispatch: the run still starts, and the reconciler enqueues later", async () => {
+    redisDown = true;
+    const execution = await engine.startExecution({ workflow: workflowOf(def("A")) }); // must NOT throw
+    expect((await taskByKey(execution._id, "A")).status).toBe(T.QUEUED); // Mongo committed
+    expect(enqueued).toEqual([]); // ...but nothing reached the queue
+
+    redisDown = false;
+    await Task.updateOne({ executionId: execution._id, key: "A" }, { $set: { queuedAt: old() } });
+    const counts = await engine.reconcile({ staleMs: 10_000 });
+    expect(counts.queued).toBe(1);
+    expect(enqueued).toEqual(["A"]);
+  });
+
+  test("RUNNING tasks with an expired lease are re-enqueued for takeover", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf({ ...def("A"), timeoutMs: 100 }) });
+    await start(_id, "A"); // lease = 100 + 50 ms ... and the worker "dies"
     enqueued = [];
+    expect((await engine.reconcile({ staleMs: 10_000 })).running).toBe(0); // lease still live
+    await sleep(200);
+    expect((await engine.reconcile({ staleMs: 10_000 })).running).toBe(1);
+    expect(enqueued).toEqual(["A"]);
+  });
+});
 
-    const recovered = await engine.recoverInProcessOrphans();
+describe("leases and takeover", () => {
+  test("a RUNNING task with a LIVE lease can't be claimed by another worker", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf(def("A")) }); // 30s timeout
+    const a = await start(_id, "A");
+    expect(await engine.startTask(a._id, "other-worker")).toBeNull();
+  });
 
-    expect(recovered).toBe(2);
-    expect(enqueued.sort()).toEqual(["A", "B"]);
-    const late = await engine.completeTask({ taskId: a._id, leaseToken: a.leaseToken });
-    expect(late.applied).toBe(false); // the dead attempt's report is fenced off
+  test("after the lease expires, another worker TAKES OVER: attempt 2, new token, old attempt ABANDONED", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf({ ...def("A"), timeoutMs: 100 }) });
+    const first = await start(_id, "A"); // worker 1 ... dies
+    expect(first).toMatchObject({ attempt: 1, leaseOwner: "test-worker" });
+    await sleep(200);
+
+    const taken = await engine.startTask(first._id, "worker-2");
+    expect(taken.task).toMatchObject({ attempt: 2, leaseOwner: "worker-2", leaseToken: first.leaseToken + 1 });
+
+    const attempts = await TaskExecution.find({ taskId: first._id }).sort({ attempt: 1 });
+    expect(attempts.map((a) => [a.attempt, a.workerId, a.status])).toEqual([
+      [1, "test-worker", "ABANDONED"],
+      [2, "worker-2", "RUNNING"],
+    ]);
+
+    // Worker 1 wakes up and reports: fenced off by the token.
+    expect((await engine.completeTask({ taskId: first._id, leaseToken: first.leaseToken })).applied).toBe(false);
+    // Worker 2's report is the one that counts.
+    expect((await engine.completeTask({ taskId: first._id, leaseToken: taken.task.leaseToken })).applied).toBe(true);
+  });
+
+  test("the lease deadline is timeoutMs + grace, computed by MongoDB's clock", async () => {
+    const { _id } = await engine.startExecution({ workflow: workflowOf({ ...def("A"), timeoutMs: 1000 }) });
+    const a = await start(_id, "A");
+    expect(a.leaseExpiresAt - a.startedAt).toBe(1000 + 50);
   });
 });

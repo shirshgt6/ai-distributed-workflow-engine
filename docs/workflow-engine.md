@@ -1,7 +1,7 @@
 # Workflow Engine
 
-> **Implemented so far (Phases 3–5):** state machines, the conditional transition primitive, the data model, DAG validation, and **execution** (dependency resolution, fail-fast, reconciliation) with an **in-process executor**.
-> **Not implemented yet:** a Redis queue (Phase 6), separate worker processes (Phase 7), retries (Phase 8), pause/resume/cancel, and lease-based crash recovery (Phase 10).
+> **Implemented so far (Phases 3–6):** state machines, the conditional transition primitive, the data model, DAG validation, **execution** (dependency resolution, fail-fast, reconciliation), and dispatch through a **Redis queue** with leases and takeover (see [redis.md](redis.md)).
+> **Not implemented yet:** separate worker processes (Phase 7), retries (Phase 8), pause/resume/cancel, and heartbeats (Phase 10).
 
 ## Definition vs execution
 
@@ -102,8 +102,9 @@ POST /workflows/:id/run
   └─ startExecution   [TRANSACTION] create execution (RUNNING, pendingTasks = n) + n Task docs
                       roots -> READY, others -> PENDING (remainingDeps = #dependencies)
   └─ dispatchReady    READY -> QUEUED (CAS) -> enqueue(task)          (after commit)
-executor
-  └─ startTask        QUEUED -> RUNNING (CAS), attempt+1, leaseToken+1, TaskExecution record
+queue worker (pulls ids from Redis)
+  └─ startTask        QUEUED (or RUNNING with an expired lease) -> RUNNING, attempt+1, leaseToken+1,
+                      leaseExpiresAt = $$NOW + timeoutMs + grace, TaskExecution record
   └─ handler({ config, input, parents, signal })   with timeout
   └─ completeTask     [TRANSACTION]
         RUNNING -> COMPLETED   only if still RUNNING with this leaseToken  (duplicate/stale = no-op)
@@ -138,8 +139,16 @@ When a task fails (no retries until Phase 8):
 Timeouts (`withTimeout` plus an `AbortSignal` passed to the handler) are failures recorded as `TIMED_OUT` attempts.
 
 ### Recovery
-- **Stuck READY** (commit succeeded, process died before dispatch): `reconcileStuckReady` runs every `RECONCILE_INTERVAL_MS` and dispatches READY tasks older than `RECONCILE_STALE_MS`.
-- **Process restart (single-process mode only):** the in-process queue is in memory, so on boot `recoverInProcessOrphans` moves RUNNING tasks to QUEUED (bumping `leaseToken` to fence the dead attempt), then QUEUED to READY, and dispatches them again. This is **only correct while exactly one process executes tasks**. Phase 10 replaces it with lease expiry.
+- **Reconciler** (`engine.reconcile`, every `RECONCILE_INTERVAL_MS`), with MongoDB as the truth:
+  READY older than `RECONCILE_STALE_MS` → dispatch (crash between commit and dispatch); QUEUED older than that
+  → enqueue again (Redis was down or lost data; enqueue is idempotent); RUNNING with an expired lease → enqueue
+  for takeover.
+- **Worker crash (Phase 6):** the MongoDB lease (`timeoutMs + LEASE_GRACE_MS`) expires, and the next claim takes
+  the task over as a new attempt with a new `leaseToken`. The old attempt is marked ABANDONED, and its late
+  report is fenced.
+- **Redis down at dispatch:** the run still returns 202. The task stays QUEUED in MongoDB and the reconciler
+  enqueues it once Redis is back.
+- *(Phase 5 only, removed in Phase 6)* **Process restart (single-process mode):** the in-process queue is in memory, so on boot `recoverInProcessOrphans` moves RUNNING tasks to QUEUED (bumping `leaseToken` to fence the dead attempt), then QUEUED to READY, and dispatches them again. This is **only correct while exactly one process executes tasks**. Phase 10 replaces it with lease expiry.
 - **Smoke-tested:** a run was killed with `kill -9` while B and C were RUNNING. After restart, both re-ran as attempt 2, D ran, and the execution completed.
 
 ### Data flow

@@ -8,7 +8,7 @@ This document has two clearly separated parts:
 
 ---
 
-## 1. Implemented (Phases 1–5)
+## 1. Implemented (Phases 1–6)
 
 ```
             ┌────────────────────────────── API process (src/server.js) ─┐
@@ -24,10 +24,12 @@ This document has two clearly separated parts:
             │       → workflowService (validateDag, ownerScope, version CAS)│
             │   → /workflows/:id/run, /executions/:id → executionService  │
             │       → ENGINE (transactions, CAS, pendingTasks counter)    │
-            │            ⇅ enqueue / start / complete / fail              │
-            │         IN-PROCESS EXECUTOR (concurrency limit, timeouts)   │
-            │            → handlers (noop, delay, fail, echo)             │
-            │   reconciler (interval) + orphan recovery (on boot)         │
+            │            │ enqueue(taskId)          ▲ start/complete/fail │
+            │            ▼                          │                     │
+            │   REDIS QUEUE ──claim (Lua: pop+lease)──► QUEUE WORKER      │
+            │   ready / leases / delayed / members      (N loops, ack last)│
+            │                                           → handlers        │
+            │   reconciler (interval): MongoDB truth → re-enqueue         │
             │   → notFound → errorHandler (uniform JSON errors)           │
             └───────────────┬─────────────────────────┬───────────────────┘
                             ▼                         ▼
@@ -68,8 +70,15 @@ This document has two clearly separated parts:
   completion transaction, which releases the children. All state is in MongoDB,
   so a crashed process loses nothing that recovery can't rebuild. Details, including
   every race and its fix, are in [docs/workflow-engine.md](docs/workflow-engine.md).
-- **Temporary:** tasks execute inside the API process. Redis and worker processes
-  replace this in Phases 6–7 behind the same `enqueue` interface. Data model details are in
+- **Redis is coordination, MongoDB is truth.** Redis holds only task ids (ready list,
+  leases, delayed set). Every multi-step queue move is one Lua script, so a task id
+  can never be "popped and lost". If Redis and MongoDB disagree, the reconciler makes
+  Redis match MongoDB. See [docs/redis.md](docs/redis.md).
+- **Leases + fencing for crash recovery.** A claimed task carries a lease
+  (`timeoutMs + grace`, on the database's clock). If it expires, another worker takes
+  over with a new `leaseToken`, and the dead worker's late report is rejected.
+- **Temporary:** the queue worker runs inside the API process. Phase 7 moves it to
+  its own process without changing the engine or the queue. Data model details are in
   [docs/database-design.md](docs/database-design.md).
 
 ## 2. Target design (not implemented yet)

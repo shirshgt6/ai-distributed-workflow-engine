@@ -31,10 +31,18 @@ const envSchema = z.object({
   // production baseline; tests lower it (min 4) purely for speed.
   BCRYPT_COST: z.coerce.number().int().min(4).max(15).default(12),
 
-  // In-process executor (Phase 5; replaced by Redis + worker processes later).
-  EXECUTOR_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(4),
-  // Reconciler: how often to look for READY tasks nobody dispatched, and how
-  // old "stuck" is. Freshly READY tasks are normal; only old ones are suspicious.
+  // Queue worker (Redis). How many tasks one process runs at once.
+  WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(4),
+  // How long an idle worker loop waits before polling Redis again.
+  QUEUE_POLL_INTERVAL_MS: z.coerce.number().int().min(10).max(10_000).default(200),
+  // Redis lease right after popping a task, covering "popped but not yet
+  // claimed in MongoDB". If the worker dies in that gap, the id comes back.
+  QUEUE_CLAIM_LEASE_MS: z.coerce.number().int().min(1000).default(30_000),
+  // Running lease = task.timeoutMs + this grace. After that, another worker
+  // may take the task over.
+  LEASE_GRACE_MS: z.coerce.number().int().min(100).default(10_000),
+  // Reconciler: how often MongoDB is compared against Redis, and how old a
+  // READY/QUEUED task must be before it counts as "stuck".
   RECONCILE_INTERVAL_MS: z.coerce.number().int().min(100).default(5000),
   RECONCILE_STALE_MS: z.coerce.number().int().min(100).default(10_000),
 }).refine((env) => env.JWT_ACCESS_SECRET !== env.JWT_REFRESH_SECRET, {
@@ -92,7 +100,12 @@ export function loadConfig(source = process.env) {
       refreshTtl: env.JWT_REFRESH_TTL,
       bcryptCost: env.BCRYPT_COST,
     }),
-    executor: Object.freeze({ concurrency: env.EXECUTOR_CONCURRENCY }),
+    worker: Object.freeze({
+      concurrency: env.WORKER_CONCURRENCY,
+      pollIntervalMs: env.QUEUE_POLL_INTERVAL_MS,
+      claimLeaseMs: env.QUEUE_CLAIM_LEASE_MS,
+      leaseGraceMs: env.LEASE_GRACE_MS,
+    }),
     reconciler: Object.freeze({ intervalMs: env.RECONCILE_INTERVAL_MS, staleMs: env.RECONCILE_STALE_MS }),
   });
 }

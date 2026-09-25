@@ -133,7 +133,7 @@ Short ADRs: context → decision → consequences. New decisions are appended.
 - **Consequences:** Simple, predictable, and gives users an immediate signal. "Continue independent branches" could be
   added later as a per-workflow option. Retries (Phase 8) will run before a task is declared FAILED.
 
-## ADR-016: In-process executor as a stepping stone
+## ADR-016: In-process executor as a stepping stone (superseded by ADR-017 in Phase 6)
 
 - **Context:** The engine's logic (transactions, dependency resolution, races) should be understood and tested before
   adding a network queue and separate processes.
@@ -141,3 +141,23 @@ Short ADRs: context → decision → consequences. New decisions are appended.
   in-memory executor implements that for now.
 - **Consequences:** Queued work lives in memory, so a restart relies on `recoverInProcessOrphans` (single-process
   only). Phase 6 swaps in Redis behind the same interface without changing engine logic.
+
+## ADR-017: Reliable Redis queue: Lua scripts, leases, reaper, ack-after-report
+
+- **Context:** Project 1 popped job ids with `BZPOPMIN`. A worker dying between the pop and recording the claim
+  lost the job silently, and nothing scanned for it. The Phase 5 in-memory queue lost all queued work on restart.
+- **Decision:** Redis holds only ids. A claim is one Lua script (`LPOP ready` + `ZADD leases deadline`), so an id
+  is always in `ready`, `leases` or `delayed`. A reaper returns expired leases. Workers ack only after MongoDB has
+  the result. Enqueue dedupes through a members set, so the reconciler can re-enqueue freely. Lease times use the
+  server clocks (Redis `TIME`, MongoDB `$$NOW`), never the worker's.
+- **Consequences:** No lost tasks. Duplicates are possible (at-least-once delivery), which is safe because the MongoDB
+  claim and completion are CAS plus fencing. Polling costs a few requests per second per idle worker. Fixed-length
+  leases (`timeoutMs + grace`) until heartbeats arrive in Phase 10.
+
+## ADR-018: Task takeover on lease expiry (in the MongoDB claim)
+
+- **Decision:** `claimTask` accepts QUEUED tasks, or RUNNING tasks whose `leaseExpiresAt` has passed. The takeover
+  bumps `attempt` and `leaseToken` in the same atomic update, and the previous attempt is marked ABANDONED.
+- **Consequences:** Crash recovery works with any number of workers (Phase 5's "requeue everything RUNNING on boot"
+  was only correct with one process). A task stalled past its timeout + grace is presumed dead, so the grace must
+  cover GC pauses and slow reporting. There's no takeover limit yet (poison pill), which is Phase 8.
