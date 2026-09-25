@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { validateDag } from "./dag.js";
 import { assertTransition, EXECUTION_STATUS as E, TASK_STATUS as T } from "./states.js";
-import { claimQueuedTask, transitionTask } from "../repositories/task.repository.js";
+import { claimTask, transitionTask } from "../repositories/task.repository.js";
 import { ATTEMPT_STATUS } from "../models/taskExecution.model.js";
 import { ValidationError } from "../utils/errors.js";
 
@@ -18,17 +18,20 @@ import { ValidationError } from "../utils/errors.js";
  *        ▲                                                             │
  *        └──────────── dispatch newly READY ◄── completeTask / failTask ◄┘
  *
- * The engine never runs task code itself. `enqueue` hands a task to whatever
- * executes it (in-process executor now; Redis queue + workers from Phase 6).
+ * The engine never runs task code itself. `enqueue` hands a task id to the
+ * Redis queue (src/queues/taskQueue.js); workers pull from there.
  *
  * @param {{
  *   models: { WorkflowExecution, Task, TaskExecution },
  *   enqueue: (item: { taskId: string, executionId: string, key: string }) => void | Promise<void>,
  *   logger: import('pino').Logger,
+ *   leaseGraceMs?: number,
  *   connection?: import('mongoose').Connection,
  * }} deps
+ *   leaseGraceMs: extra time on top of a task's timeoutMs before its lease
+ *   expires and another worker may take it over.
  */
-export function createEngine({ models, enqueue, logger, connection = mongoose.connection }) {
+export function createEngine({ models, enqueue, logger, leaseGraceMs = 10_000, connection = mongoose.connection }) {
   const { WorkflowExecution, Task, TaskExecution } = models;
 
   const now = () => new Date();
@@ -50,9 +53,28 @@ export function createEngine({ models, enqueue, logger, connection = mongoose.co
   async function dispatchTask(task) {
     const won = await transitionTask(task._id, T.READY, T.QUEUED, { set: { queuedAt: now() } });
     if (!won) return false;
-    await enqueue({ taskId: String(task._id), executionId: String(task.executionId), key: task.key });
+    await enqueueSafely(task);
     logger.debug({ executionId: String(task.executionId), taskKey: task.key }, "task dispatched");
     return true;
+  }
+
+  /**
+   * MongoDB already says QUEUED (committed). If Redis is down right now, do
+   * NOT fail the caller: the run really did start, and a 500 would make the
+   * client retry and start a second run. The reconciler re-enqueues stale
+   * QUEUED tasks once Redis is back. Enqueue is idempotent, so that's safe.
+   */
+  async function enqueueSafely(task) {
+    try {
+      await enqueue({ taskId: String(task._id), executionId: String(task.executionId), key: task.key });
+      return true;
+    } catch (err) {
+      logger.warn(
+        { taskId: String(task._id), err: err.message },
+        "enqueue failed; task stays QUEUED in MongoDB and the reconciler will retry"
+      );
+      return false;
+    }
   }
 
   return {
@@ -68,7 +90,7 @@ export function createEngine({ models, enqueue, logger, connection = mongoose.co
      *
      * Dispatching happens AFTER the commit. If we crash between commit and
      * dispatch, the READY tasks are still on the whiteboard and the
-     * reconciler (reconcileStuckReady) will dispatch them.
+     * reconciler (reconcile) will dispatch them.
      *
      * @param {{ workflow: object, input?: object, triggeredBy?: string }} params
      */
@@ -143,18 +165,26 @@ export function createEngine({ models, enqueue, logger, connection = mongoose.co
     },
 
     /**
-     * Executor picks up a task: QUEUED -> RUNNING (+ attempt, + fencing token),
+     * A worker picks up a task: -> RUNNING (+ attempt, + fencing token, + lease),
      * records the attempt, and gathers the handler's inputs.
      *
-     * @returns {Promise<null | { task, input, parents }>} null = skip (cancelled or claimed elsewhere)
+     * @returns {Promise<null | { task, input, parents }>} null = skip
+     *   (finished, cancelled, or running elsewhere under a live lease)
      */
     async startTask(taskId, workerId) {
-      const task = await claimQueuedTask(taskId, workerId);
+      const task = await claimTask(taskId, workerId, { leaseGraceMs });
       if (!task) return null;
 
-      // Not in the claim transaction on purpose (Phase 5 keeps claim cheap).
-      // If we crash right here the task is RUNNING without an attempt record;
-      // lease-based recovery (Phase 10) covers orphaned RUNNING tasks.
+      // If this was a TAKEOVER, the previous attempt's record is still RUNNING:
+      // its worker vanished. Close it as ABANDONED so history is truthful.
+      await TaskExecution.updateMany(
+        { taskId: task._id, attempt: { $lt: task.attempt }, status: ATTEMPT_STATUS.RUNNING },
+        { $set: { status: ATTEMPT_STATUS.ABANDONED, finishedAt: now() } }
+      );
+
+      // Not in the claim's atomic update on purpose (keeps claim cheap). If we
+      // crash right here the task is RUNNING without an attempt record; its
+      // lease expires and another worker takes it over.
       await TaskExecution.create({
         taskId: task._id,
         executionId: task.executionId,
@@ -341,61 +371,52 @@ export function createEngine({ models, enqueue, logger, connection = mongoose.co
     },
 
     /**
-     * RECONCILER: find READY tasks that nobody dispatched and dispatch them.
+     * RECONCILER — MongoDB (the whiteboard) is the truth; make Redis agree.
+     * Runs periodically. Each sweep is safe to run concurrently with normal
+     * operation and with other reconcilers, because every step is either a
+     * CAS (READY -> QUEUED) or an idempotent enqueue (Redis dedupes by id).
      *
-     * How a task gets stuck READY: a transaction committed "D is READY", then
-     * the process crashed before calling dispatch. Memory forgot; the
-     * whiteboard didn't. Only tasks READY for longer than `staleMs` are
-     * touched — a freshly READY task is about to be dispatched normally.
-     * Safe to run concurrently with normal dispatch: READY -> QUEUED is a CAS.
+     *   1. READY for longer than staleMs  -> never dispatched (crash between
+     *      commit and dispatch): dispatch now.
+     *   2. QUEUED for longer than staleMs -> maybe missing from Redis (Redis
+     *      was down during enqueue, or lost data): enqueue again (no-op if
+     *      it's still there).
+     *   3. RUNNING with an expired lease  -> its worker is gone and Redis may
+     *      have lost the lease too: enqueue so a worker can take it over.
      *
-     * @returns {Promise<number>} how many tasks this call dispatched
+     * @returns {Promise<{ ready: number, queued: number, running: number }>}
+     *   queued/running count enqueue calls made, not tasks actually missing
      */
-    async reconcileStuckReady({ staleMs, limit = 100 }) {
+    async reconcile({ staleMs, limit = 100 }) {
       const cutoff = new Date(Date.now() - staleMs);
-      const stuck = await Task.find({ status: T.READY, readyAt: { $lt: cutoff } })
+      const counts = { ready: 0, queued: 0, running: 0 };
+
+      const stuckReady = await Task.find({ status: T.READY, readyAt: { $lt: cutoff } })
         .select("_id key executionId")
         .limit(limit);
-      let dispatched = 0;
-      for (const task of stuck) {
-        if (await dispatchTask(task)) dispatched += 1;
+      for (const task of stuckReady) {
+        if (await dispatchTask(task)) counts.ready += 1;
       }
-      if (dispatched > 0) logger.warn({ dispatched }, "reconciler dispatched stuck READY tasks");
-      return dispatched;
-    },
 
-    /**
-     * SINGLE-PROCESS MODE ONLY (Phase 5). The in-process executor's queue
-     * lives in memory, so after a restart every QUEUED or RUNNING task is an
-     * orphan: nothing will ever run or finish it. Move them back to READY /
-     * QUEUED and dispatch again.
-     *
-     * This is only correct while exactly ONE process executes tasks. With
-     * multiple workers (Phase 7) a RUNNING task may belong to a healthy
-     * worker elsewhere — Phase 10 replaces this with lease expiry.
-     *
-     * @returns {Promise<number>} tasks recovered
-     */
-    async recoverInProcessOrphans() {
-      // RUNNING -> QUEUED ("worker died"). Bumping leaseToken fences off any
-      // late report from the dead attempt.
-      assertTransition("task", T.RUNNING, T.QUEUED);
-      const running = await Task.updateMany(
-        { status: T.RUNNING },
-        { $set: { status: T.QUEUED, leaseOwner: null, queuedAt: now() }, $inc: { leaseToken: 1 } }
-      );
-      // QUEUED -> READY, then dispatch through the normal CAS path.
-      assertTransition("task", T.QUEUED, T.READY);
-      const orphans = await Task.find({ status: T.QUEUED }).select("_id executionId");
-      await Task.updateMany({ _id: { $in: orphans.map((t) => t._id) }, status: T.QUEUED }, { $set: { status: T.READY } });
-      const executionIds = [...new Set(orphans.map((t) => String(t.executionId)))];
-      for (const id of executionIds) await dispatchReady(id);
-
-      const recovered = orphans.length;
-      if (recovered > 0) {
-        logger.warn({ recovered, wereRunning: running.modifiedCount }, "recovered orphaned tasks after restart");
+      const staleQueued = await Task.find({ status: T.QUEUED, queuedAt: { $lt: cutoff } })
+        .select("_id key executionId")
+        .limit(limit);
+      for (const task of staleQueued) {
+        if (await enqueueSafely(task)) counts.queued += 1;
       }
-      return recovered;
+
+      const expiredRunning = await Task.find({
+        status: T.RUNNING,
+        $expr: { $lt: ["$leaseExpiresAt", "$$NOW"] },
+      })
+        .select("_id key executionId")
+        .limit(limit);
+      for (const task of expiredRunning) {
+        if (await enqueueSafely(task)) counts.running += 1;
+      }
+
+      if (counts.ready + counts.running > 0) logger.warn(counts, "reconciler re-dispatched tasks");
+      return counts;
     },
   };
 }

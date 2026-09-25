@@ -1,4 +1,4 @@
-// End-to-end: HTTP -> engine -> in-process executor -> real handlers -> MongoDB.
+// End-to-end: HTTP -> engine -> Redis queue -> worker -> real handlers -> MongoDB.
 import request from "supertest";
 import { connectMongo, disconnectMongo } from "../../src/config/mongo.js";
 import { User } from "../../src/models/user.model.js";
@@ -8,7 +8,8 @@ import { Task } from "../../src/models/task.model.js";
 import { TaskExecution } from "../../src/models/taskExecution.model.js";
 import { MONGO_URI, logger, createTestStack, createUser, as, waitFor } from "../helpers/testApp.js";
 
-const { app, executor } = createTestStack({ concurrency: 4 });
+const stack = createTestStack({ concurrency: 4 });
+const { app } = stack;
 
 let alice; // operator
 let bob; // operator
@@ -22,6 +23,7 @@ async function clean() {
 
 beforeAll(async () => {
   await connectMongo(MONGO_URI, logger);
+  await stack.start();
   await clean();
   await Promise.all([User.init(), Task.init(), TaskExecution.init()]);
   [alice, bob, victor] = await Promise.all([
@@ -32,7 +34,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await executor.stop();
+  await stack.stop();
   await clean();
   await disconnectMongo();
 });

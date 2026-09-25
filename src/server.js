@@ -1,3 +1,4 @@
+import os from "node:os";
 import dotenv from "dotenv";
 import { loadConfig } from "./config/env.js";
 import { createLogger } from "./config/logger.js";
@@ -13,7 +14,8 @@ import { WorkflowExecution } from "./models/workflowExecution.model.js";
 import { Task } from "./models/task.model.js";
 import { TaskExecution } from "./models/taskExecution.model.js";
 import { createEngine } from "./workflow/engine.js";
-import { createInProcessExecutor } from "./workflow/inProcessExecutor.js";
+import { createTaskQueue } from "./queues/taskQueue.js";
+import { createQueueWorker } from "./workers/queueWorker.js";
 import { createExecutionService } from "./services/execution.service.js";
 import { handlers } from "./handlers/index.js";
 
@@ -37,22 +39,36 @@ async function main() {
   const authService = createAuthService({ User, tokens, bcryptCost: config.auth.bcryptCost });
   const workflowService = createWorkflowService({ Workflow });
 
-  // Engine <-> executor reference each other: the engine enqueues into the
-  // executor, the executor reports results to the engine.
-  const executor = createInProcessExecutor({ handlers, concurrency: config.executor.concurrency, logger });
+  // Engine -> Redis queue -> worker -> engine. MongoDB holds task state;
+  // Redis only holds "which task id to pick up next".
+  const queue = createTaskQueue(redis);
   const engine = createEngine({
     models: { WorkflowExecution, Task, TaskExecution },
-    enqueue: (item) => executor.enqueue(item),
+    enqueue: (item) => queue.enqueue(item.taskId),
     logger,
+    leaseGraceMs: config.worker.leaseGraceMs,
   });
-  executor.attach(engine);
   const executionService = createExecutionService({ Workflow, WorkflowExecution, Task, engine });
 
-  // Anything this process was running/queueing before a crash is an orphan now.
-  await engine.recoverInProcessOrphans();
+  // Phase 6: the worker still runs inside the API process, but it now pulls
+  // from Redis, so it survives restarts and could be moved to its own process
+  // (Phase 7) without changing the engine.
+  const worker = createQueueWorker({
+    queue,
+    engine,
+    handlers,
+    logger,
+    workerId: `${os.hostname()}-${process.pid}`,
+    concurrency: config.worker.concurrency,
+    pollIntervalMs: config.worker.pollIntervalMs,
+    claimLeaseMs: config.worker.claimLeaseMs,
+    leaseGraceMs: config.worker.leaseGraceMs,
+  });
+  worker.start();
+
   const reconcileTimer = setInterval(() => {
     engine
-      .reconcileStuckReady({ staleMs: config.reconciler.staleMs })
+      .reconcile({ staleMs: config.reconciler.staleMs })
       .catch((err) => logger.error({ err: err.message }, "reconciler run failed"));
   }, config.reconciler.intervalMs);
 
@@ -105,8 +121,9 @@ async function main() {
     await new Promise((resolve) => server.close(resolve));
     clearInterval(reconcileTimer);
     // Let running task handlers finish and REPORT before the DB connection
-    // closes; otherwise their results would be lost.
-    await executor.stop();
+    // closes; otherwise their results would be lost. Unclaimed tasks simply
+    // stay in Redis for the next worker.
+    await worker.stop();
     await Promise.allSettled([disconnectMongo(), redis.quit()]);
 
     logger.info("shutdown complete");

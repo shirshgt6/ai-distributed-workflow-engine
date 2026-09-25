@@ -9,7 +9,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 3 | Workflow and task domain models | ✅ |
 | 4 | DAG validation | ✅ |
 | 5 | Workflow execution engine | ✅ |
-| 6 | Redis task scheduling | ⬜ |
+| 6 | Redis task scheduling | ✅ |
 | 7 | Distributed workers | ⬜ |
 | 8 | Concurrency + retries + backoff | ⬜ |
 | 9 | Idempotency + distributed locks | ⬜ |
@@ -161,3 +161,37 @@ execution completes.
 **Known limitations (by design for this phase)**: tasks run inside the API process (Redis queue in Phase 6, workers
 in Phase 7); no retries (Phase 8); orphan recovery is only correct with a single executing process (Phase 10 leases);
 no pause/resume/cancel endpoints yet; no idempotency key on `/run` (a double click starts two runs, Phase 9).
+
+> Note: Phase 5's in-process executor and `recoverInProcessOrphans` were **replaced in Phase 6** by the Redis queue,
+> the queue worker, lease takeover and the 3-sweep reconciler.
+
+## Phase 6 — Redis task scheduling ✅
+
+**Implemented**
+- `src/queues/taskQueue.js`: ready LIST, leases ZSET, delayed ZSET, members SET. Lua scripts for enqueue (dedupe),
+  claim (pop + lease), extendLease, ack, requeueExpired (reaper) and enqueueDelayed/promoteDue. Times come from Redis `TIME`
+- `claimTask` (MongoDB): QUEUED, or RUNNING with an expired lease (takeover). Pipeline update using `$$NOW`, which bumps
+  attempt and leaseToken and sets `leaseExpiresAt = now + timeoutMs + grace`. The previous attempt is marked ABANDONED
+- `src/workers/queueWorker.js`: N claim loops, lease extension, run → report → **ack last**, exponential backoff
+  when Redis is down, reaper and promoter every second. `src/workers/runTask.js` holds the handler, timeout, abort and report
+- Engine: a Redis failure at dispatch no longer fails the request. `reconcile()` runs 3 sweeps (stale READY, stale QUEUED,
+  expired RUNNING)
+- Config: `WORKER_CONCURRENCY`, `QUEUE_POLL_INTERVAL_MS`, `QUEUE_CLAIM_LEASE_MS`, `LEASE_GRACE_MS`
+- Removed: the in-process executor and startup orphan recovery
+
+**Tests**: 204 total. New: queue (FIFO, dedupe, 50 concurrent claims over 20 tasks, lease expiry, extend and reaped
+extend, concurrent reapers and promoters, delayed), worker (ack-last ordering, no ack when reporting fails, backoff,
+concurrency, graceful stop), engine (live lease blocks claim, takeover with ABANDONED + fencing, lease maths, Redis down
+at dispatch, reconciler sweeps), end-to-end recovery (pop-then-die, die mid-task, Redis data wiped).
+
+**Mutation check**: claim without a lease (Project 1 behaviour), enqueue without dedupe, ack before report, no takeover,
+no token bump. All 5 were caught.
+
+**Smoke-tested on the real server**
+- `kill -9` while B and C were running: after restart they stayed RUNNING until their leases expired (3s timeout + 1s
+  grace), then were taken over as attempt 2, and the run completed.
+- Redis stopped before `POST /run`: 202 returned, A stayed QUEUED; after Redis restarted, the reconciler enqueued it and
+  the run completed.
+
+**Known limitations**: the worker runs in the API process (Phase 7); no heartbeat, so leases are fixed at timeout + grace
+(Phase 10); no retry or takeover limit (Phase 8); single Redis node.

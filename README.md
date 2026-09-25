@@ -5,8 +5,8 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phase 5 of 28 complete — workflows are defined, validated and EXECUTED (in-process executor).**
-> Redis queueing and separate worker processes are the next phases. See [docs/progress.md](docs/progress.md)
+> **Status: Phase 6 of 28 complete — workflows run through a reliable Redis queue with leases and crash recovery.**
+> The worker still runs inside the API process; separate worker processes are Phase 7. See [docs/progress.md](docs/progress.md)
 > for exactly what is implemented, and [ARCHITECTURE.md](ARCHITECTURE.md)
 > for the target design.
 
@@ -27,7 +27,10 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
   and `POST /workflows/validate` returning topological order + parallel levels
 - **Execution engine**: `POST /workflows/:id/run` runs the DAG with independent tasks in parallel, data flowing
   from parents to children, transactional state changes, fail-fast failure handling, timeouts, and recovery of
-  stuck or orphaned tasks after a crash (in-process executor for now)
+  stuck or orphaned tasks after a crash
+- **Reliable Redis queue**: atomic Lua claim with a lease (no "popped then lost" jobs), a reaper,
+  delayed tasks, and dedupe. Worker takeover after a crash uses fencing tokens, and a reconciler rebuilds
+  Redis from MongoDB. See [docs/redis.md](docs/redis.md)
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)
 
@@ -99,7 +102,9 @@ src/
   auth/              passwords, tokens, permissions (RBAC table), ownership, request schemas
   models/            Mongoose models (User, Workflow, WorkflowExecution, Task, TaskExecution)
   repositories/      race-safe data operations (transitionTask)
-  workflow/          engine, in-process executor, state machines, DAG validation, request schemas
+  workflow/          engine, state machines, DAG validation, request schemas
+  queues/            Redis task queue (Lua scripts)
+  workers/           queue worker loop, runTask (handler + timeout + report)
   handlers/          built-in task handlers (noop, delay, fail, echo)
   middleware/        requestId, errorHandler, authenticate, authorize, validate
   controllers/       HTTP <-> service translation
@@ -111,7 +116,7 @@ tests/unit/          fast tests, fake dependencies
 tests/integration/   real Mongo/Redis
 tests/helpers/       shared integration-test setup
 docker/              docker-compose.yml
-docs/                progress, decisions (ADRs), api-design, security, database-design, workflow-engine
+docs/                progress, decisions (ADRs), api-design, security, database-design, workflow-engine, redis
 ```
 
 ## Benchmarks
