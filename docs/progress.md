@@ -27,7 +27,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 21 | Human-in-the-loop | ✅ |
 | 22 | AI retry/fallback | ✅ |
 | 23 | LLM observability + analytics | ✅ |
-| 24 | Security hardening | ⬜ |
+| 24 | Security hardening | ✅ |
 | 25 | Testing hardening (chaos tests) | ⬜ |
 | 26 | Docker Compose for app services | ⬜ |
 | 27 | Swagger + documentation | ⬜ |
@@ -309,3 +309,12 @@ expires overdue approvals; cancel closes pending approvals; `GET /approvals`, `G
 secondary provider via `LLM_FALLBACK_*`, and `GET /analytics/ai` and `GET /analytics/workflows` (p95 via `$percentile`).
 **Tests**: 363 total (breaker transitions, fallback rules, cost maths, config validation, attribution + analytics e2e with scoping).
 Real-model fallback demo with circuit opening.
+
+## Phase 24 — Security hardening ✅
+**Implemented**: Redis sliding-window rate limiting (atomic Lua; login per IP+email and per IP, register, API per user,
+runs, uploads; auth fails closed, the rest fails open; RateLimit/Retry-After headers); `TRUST_PROXY`; a per-route body limit
+(`/documents` 256 KB, the rest 100 KB). **Bug fixed**: document uploads over 100 KB were refused by the global body parser
+despite a 200 KB schema limit. Added `npm run check:secrets` and `npm run audit`, and wrote the threat model table in
+docs/security.md.
+**Tests**: 373 total, including the limiter race (20 → exactly 5), sliding recovery, brute force + spraying, fail-closed vs
+fail-open, NoSQL injection, body limits, and prompt injection with an *obedient* model.

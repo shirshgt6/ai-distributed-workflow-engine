@@ -48,5 +48,50 @@ pino redacts `authorization` and `cookie` headers, and fields named `password`, 
 - **Refresh tokens are not rotated with reuse detection.** An old refresh token keeps working until logout or expiry. Production improvement: store each refresh token's `jti`, rotate on every use, and treat reuse of an old one as theft (revoke everything).
 - **Registration reveals whether an email exists** (409 `EMAIL_TAKEN`). This is a usability trade-off, and rate limiting is the mitigation.
 
-## Planned (not implemented)
-Login and registration rate limiting (Redis, Phase 24), prompt-injection defences and agent tool restrictions (Phases 20 and 24).
+## Rate limiting (Phase 24), `src/middleware/rateLimit.js`
+A **sliding-window log** in Redis as **one Lua script** (drop old entries → count → add or refuse). It's atomic, so 20
+concurrent requests against a limit of 5 let exactly 5 through (tested). Unlike a fixed window, it never allows 2× the
+limit around a boundary.
+
+| Limiter | Key | Limit | Redis down |
+|---|---|---|---|
+| login per account | IP + email | 5 / 15 min | **fail closed** (503) |
+| login per IP | IP | 20 / 15 min | **fail closed** |
+| register | IP | 5 / hour | **fail closed** |
+| authenticated API | user id | 300 / min | fail open |
+| start runs | user id | 60 / min | fail open |
+| document uploads | user id | 20 / hour | fail open |
+
+- Limits run **before validation and bcrypt**, so every attempt counts and a flood never burns CPU on password hashing.
+- The response carries `RateLimit-Limit`, `RateLimit-Remaining`, and on 429 a `Retry-After` header plus `RATE_LIMITED` details.
+- **The fail-open vs fail-closed choice:** protection that matters for security (login) must not disappear when Redis does.
+  General limits favour availability.
+- `req.ip` comes from `TRUST_PROXY`. Only trust your own proxy hops, because `X-Forwarded-For` is otherwise attacker-controlled.
+
+## Threat model: attack → control → evidence
+| Attack | Control | Tested |
+|---|---|---|
+| Password brute force on one account | per IP+email limit | ✅ the 6th attempt returns 429, even with the correct password |
+| Credential spraying across accounts | per-IP login limit | ✅ |
+| Offline cracking after a DB leak | bcrypt cost 12, per-password salt | ✅ (hash format) |
+| User enumeration (message and timing) | identical 401 + dummy hash | ✅ |
+| Token forgery / `alg:none` / token confusion | pinned HS256, separate secrets, `type` claim | ✅ |
+| Mass assignment (`role: admin`) | zod allowlists, server-set fields | ✅ |
+| BOLA/IDOR (others' workflows, runs, docs, approvals, analytics) | ownership filter **inside every query**, 404 | ✅ |
+| Privilege escalation (operator → admin) | RBAC table, `user:manage` admin-only | ✅ |
+| NoSQL operator injection (`{"$ne": null}`) | zod types + ObjectId validation; `strictQuery` | ✅ 400 before any query |
+| Large-payload DoS | 100 KB body limit (256 KB for `/documents`), zod max lengths, task/doc caps | ✅ 413 |
+| Prompt injection → extra output fields | structured output + zod (unknown keys stripped) | ✅ |
+| Prompt injection → invented enum / tool | enums in schemas; invalid output → repair → reject or heuristic | ✅ |
+| Prompt injection via documents / tool results | `<document>`/`<tool_result>` delimiters + citation enum + tool allowlist | ✅ (a model that *obeys* the injection still can't call `shell`) |
+| Agent reading other users' data | ownerId from the task context, never from model args | ✅ |
+| Arbitrary code execution through the agent | no shell/HTTP/file tools; calculator parser, never `eval` | ✅ |
+| Secrets in the repo | `.gitignore`, `npm run check:secrets` (patterns + local `.env` values) | ✅ run before each commit |
+| Secrets in logs | pino redaction; no prompt text stored in `aiexecutions` | ✅ |
+| Vulnerable dependencies | `npm run audit` | 0 known vulnerabilities at the time of writing |
+
+## Not implemented (known gaps)
+CORS configuration (the API is intended for server-side or same-origin clients: browsers block cross-origin calls by
+default), CSRF (not applicable to Bearer-token APIs), refresh-token rotation with reuse detection, separation of duties
+for approvals, a WAF / bot detection, encryption at rest (delegated to the database deployment), and security headers
+beyond helmet's defaults.

@@ -21,6 +21,7 @@ import { listWorkers } from "./workers/registry.js";
 import { createProviderFromConfig } from "./ai/providers/index.js";
 import { AIExecution } from "./models/aiExecution.model.js";
 import { createAnalyticsService } from "./services/analytics.service.js";
+import { createRateLimiters } from "./middleware/rateLimit.js";
 import { createRagFromConfig } from "./ai/rag/index.js";
 import { KnowledgeDocument } from "./models/knowledge.model.js";
 import { createExecutionService } from "./services/execution.service.js";
@@ -69,6 +70,9 @@ async function main() {
   const app = createApp({
     logger,
     bodyLimit: config.bodyLimit,
+    documentBodyLimit: config.documentBodyLimit,
+    trustProxy: config.security.trustProxy,
+    rateLimiters: config.security.rateLimitEnabled ? createRateLimiters({ redis, logger }) : undefined,
     checks: {
       mongo: pingMongo,
       redis: () => pingRedis(redis),

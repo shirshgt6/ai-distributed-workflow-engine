@@ -32,6 +32,7 @@ import { createToolRegistry } from "../../src/ai/agent/tools.js";
 import { createObservedProvider } from "../../src/ai/observability.js";
 import { AIExecution } from "../../src/models/aiExecution.model.js";
 import { createAnalyticsService } from "../../src/services/analytics.service.js";
+import { createRateLimiters } from "../../src/middleware/rateLimit.js";
 
 export const MONGO_URI =
   process.env.MONGO_URI_TEST ?? "mongodb://localhost:27018/workflow_engine_test?directConnection=true";
@@ -69,6 +70,7 @@ export function createTestStack({
   llm = createMockProvider(),
   ragOptions = {},
   pricing = {},
+  rateLimits = false,
 } = {}) {
   // Same stack as production: every LLM call goes through the observability decorator.
   const observed = createObservedProvider(llm, { AIExecution, pricing, logger });
@@ -116,6 +118,8 @@ export function createTestStack({
     knowledge: { rag, KnowledgeDocument },
     approvals: { engine, ApprovalRequest },
     analyticsService: createAnalyticsService({ WorkflowExecution, Task, TaskExecution, AIExecution }),
+    // Isolated key prefix per stack, so repeated test runs never share counters.
+    rateLimiters: rateLimits ? createRateLimiters({ redis, logger, prefix: `test:rl:${randomUUID()}` }) : undefined,
   });
 
   return {
