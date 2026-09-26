@@ -1,0 +1,11 @@
+# Keep the build context (and the image) free of secrets and junk.
+.env
+.env.*
+!.env.example
+node_modules
+.git
+coverage
+tests
+docs
+*.log
+.DS_Store

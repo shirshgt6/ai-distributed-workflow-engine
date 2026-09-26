@@ -29,7 +29,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 23 | LLM observability + analytics | ✅ |
 | 24 | Security hardening | ✅ |
 | 25 | Testing hardening (chaos tests) | ✅ |
-| 26 | Docker Compose for app services | ⬜ |
+| 26 | Docker Compose for app services | ✅ |
 | 27 | Swagger + documentation | ⬜ |
 | 28 | Final production review | ⬜ |
 
@@ -325,3 +325,13 @@ invariants checked in MongoDB), and registry/factory tests (a coverage gap: `GET
 **Measured**: coverage 93.2% statements / 78.3% branches / 95.0% lines. Chaos: 40 runs × 7 tasks with 14 worker kills + a Redis
 restart, every invariant held (exactly one successful attempt and one completion event per task). See docs/testing.md.
 **Honest note**: one unidentified flaky failure in 1 of 3 coverage runs.
+
+## Phase 26 — Docker ✅
+**Implemented**: `Dockerfile` (node:22-alpine, `npm ci --omit=dev --ignore-scripts`, non-root `node` user, one image for three
+roles), `.dockerignore` (no `.env`, tests or docs), and compose profile `app` (api with a `/ready` healthcheck, `worker` ×2
+with `stop_grace_period` for draining, analytics consumer; secrets via `--env-file`; Ollama via `host.docker.internal`).
+`npm run app:up` / `app:down`.
+**Smoke-tested in containers**: a diamond + `ai.generate` run completed, tasks were split across both worker containers, the AI
+call went from a container to the host's Ollama and was recorded in analytics, and the consumer container counted Kafka events.
+Image: 89 MB. **Bug found only in the container**: `create-admin` hard-coded the pretty logger, whose dev dependency isn't in the
+production image. The login rate limiter also (correctly) blocked the 6th login attempt during debugging.

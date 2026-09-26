@@ -1,5 +1,6 @@
-# Local infrastructure for development and integration tests.
-# Only the services the code ACTUALLY uses are here.
+# Local infrastructure (default) + the application itself (profile "app").
+#   npm run infra:up / infra:down   -> MongoDB, Redis, Kafka, Qdrant only (dev + tests)
+#   npm run app:up   / app:down     -> also API, 2 workers, analytics consumer in containers
 #
 #   npm run infra:up     # start + wait until healthy
 #   npm run infra:down   # stop (volumes are kept)
@@ -92,6 +93,73 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  # ---------------------------------------------------------------------------
+  # APPLICATION (profile "app"):  npm run app:up   /   npm run app:down
+  # Same image for all three; secrets come from the host's .env (--env-file),
+  # never baked into the image. Service names replace localhost.
+  # ---------------------------------------------------------------------------
+  api:
+    profiles: ["app"]
+    build: { context: .., dockerfile: Dockerfile }
+    image: workflow-engine:local
+    command: ["node", "src/server.js"]
+    ports:
+      - "4000:4000"
+    environment: &app-env
+      NODE_ENV: production
+      LOG_LEVEL: info
+      PORT: "4000"
+      MONGO_URI: mongodb://mongo:27017/workflow_engine?directConnection=true
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:19092
+      QDRANT_URL: http://qdrant:6333
+      # Ollama runs on the host (GPU/Metal access); containers reach it here.
+      LLM_BASE_URL: http://host.docker.internal:11434
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET in .env}
+      TRUST_PROXY: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on: &app-deps
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/ready > /dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    profiles: ["app"]
+    image: workflow-engine:local
+    command: ["node", "src/worker.js"]
+    environment: *app-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      <<: *app-deps
+      api: { condition: service_healthy } # api's build produces the shared image
+    # Horizontal scaling: more replicas, no code change (docker compose up --scale worker=5).
+    deploy:
+      replicas: 2
+    # Give in-flight tasks time to finish on `docker compose stop` (SIGTERM -> drain).
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  analytics-consumer:
+    profiles: ["app"]
+    image: workflow-engine:local
+    command: ["node", "src/consumers/analytics.js"]
+    environment: *app-env
+    depends_on:
+      <<: *app-deps
+      api: { condition: service_healthy }
+    restart: unless-stopped
 
 volumes:
   mongo_data:

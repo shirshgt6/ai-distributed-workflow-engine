@@ -21,7 +21,8 @@ import { ROLES } from "../src/auth/permissions.js";
 async function main() {
   dotenv.config({ quiet: true });
   const config = loadConfig();
-  const logger = createLogger({ level: "info", pretty: true });
+  // pino-pretty is a dev dependency: it doesn't exist in the production image.
+  const logger = createLogger({ level: "info", pretty: !config.isProduction });
 
   const parsed = registerSchema.body.safeParse({
     email: process.env.ADMIN_EMAIL,
