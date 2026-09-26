@@ -191,3 +191,13 @@ table get the same dish twice? Does the register match the plates? Result: 280 d
 sent home, 34 half-cooked dishes finished by someone else.
 **Remember:** a test is only as good as the invariant it checks. "Did it finish?" isn't enough; also ask "did anything
 happen twice?". Chaos results are correctness evidence, not performance numbers.
+
+## Phase 26: Docker
+**Built:** one small image (89 MB, non-root) that runs as API, worker or Kafka consumer. `npm run app:up` starts the whole
+system: MongoDB, Redis, Kafka, Qdrant, the API, 2 workers and the consumer. More workers is just `--scale worker=5`.
+**Real life:** a **food-truck kit**. The same truck design becomes the order counter, a kitchen or the accounts desk
+depending on who's inside it (the command). Park 5 kitchen trucks on a busy day (scale). The truck never carries the
+**safe keys** (secrets). They're handed over at the start of each shift (env file). The fire drill caught one thing that
+only happens **in the truck, not at home**: a tool that's only in the home kitchen (a dev dependency) was missing.
+**Remember:** one image for many roles, no secrets in images, non-root, health checks, graceful stop periods. Always
+smoke-test the actual container, because "works on my machine" bugs live exactly there.

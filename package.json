@@ -24,7 +24,9 @@
     "check:secrets": "node scripts/check-secrets.js",
     "audit": "npm audit --omit=dev",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects unit integration --runInBand --coverage --coverageReporters=text-summary --coverageReporters=json-summary --collectCoverageFrom=\"src/**/*.js\" --collectCoverageFrom=\"!src/server.js\" --collectCoverageFrom=\"!src/worker.js\" --collectCoverageFrom=\"!src/consumers/**\"",
-    "chaos": "node scripts/chaos.js"
+    "chaos": "node scripts/chaos.js",
+    "app:up": "docker compose -f docker/docker-compose.yml --env-file .env --profile app up -d --build --wait",
+    "app:down": "docker compose -f docker/docker-compose.yml --env-file .env --profile app rm -sf api worker analytics-consumer"
   },
   "keywords": [
     "workflow",

@@ -5,7 +5,7 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phases 1–25 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
+> **Status: Phases 1–26 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
 > queue (retries, dead-lettering, crash recovery, heartbeats, pause/cancel, cron schedules, Kafka events). The AI layer has
 > provider abstraction, validated structured output, classification, model routing and RAG with Qdrant; see
 > [docs/ai-architecture.md](docs/ai-architecture.md) and [docs/rag.md](docs/rag.md).
@@ -96,6 +96,19 @@ curl -X POST localhost:4000/workflows/<id>/run -H "Authorization: Bearer $TOKEN"
 curl localhost:4000/executions/<executionId> -H "Authorization: Bearer $TOKEN"
 ```
 
+### Run everything in containers (Phase 26)
+
+```bash
+cp .env.example .env         # set real JWT secrets
+npm run app:up               # builds the image; starts Mongo, Redis, Kafka, Qdrant, API, 2 workers, analytics consumer
+docker compose -f docker/docker-compose.yml --env-file .env --profile app exec \
+  -e ADMIN_EMAIL=you@example.com -e ADMIN_PASSWORD='a-long-password' api node scripts/create-admin.js
+docker compose -f docker/docker-compose.yml --env-file .env --profile app up -d --scale worker=5   # scale out
+npm run app:down             # stop the app containers (infrastructure keeps running)
+```
+One image runs as API, worker or consumer, depending on the command. It runs as the non-root `node` user, with no secrets
+baked in (they come from `.env` at runtime). Ollama stays on the host and is reached at `host.docker.internal`.
+
 Host ports are **27018** (Mongo) and **6380** (Redis) so this can run next to
 other local projects using the default ports.
 
@@ -118,6 +131,7 @@ other local projects using the default ports.
 | `npm run audit` | `npm audit` for production dependencies |
 | `npm run create-admin` | Create or promote an admin (reads `ADMIN_EMAIL` / `ADMIN_PASSWORD`) |
 | `npm run infra:up` / `infra:down` | Start / stop local infrastructure |
+| `npm run app:up` / `app:down` | Build + run the whole app in containers / stop the app containers |
 
 ## Project layout
 
