@@ -5,7 +5,7 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phases 1–26 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
+> **Status: Phases 1–27 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
 > queue (retries, dead-lettering, crash recovery, heartbeats, pause/cancel, cron schedules, Kafka events). The AI layer has
 > provider abstraction, validated structured output, classification, model routing and RAG with Qdrant; see
 > [docs/ai-architecture.md](docs/ai-architecture.md) and [docs/rag.md](docs/rag.md).
@@ -85,6 +85,7 @@ ADMIN_EMAIL=you@example.com ADMIN_PASSWORD='a-long-password' npm run create-admi
 ```bash
 curl localhost:4000/health  # {"status":"ok",...}
 curl localhost:4000/ready   # {"status":"ready","checks":{"mongo":...,"redis":...}}
+open http://localhost:4000/docs   # interactive API docs (Swagger UI)
 ```
 
 Run a workflow (with a token from `POST /auth/login` as an operator or admin):

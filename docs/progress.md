@@ -30,7 +30,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 24 | Security hardening | ✅ |
 | 25 | Testing hardening (chaos tests) | ✅ |
 | 26 | Docker Compose for app services | ✅ |
-| 27 | Swagger + documentation | ⬜ |
+| 27 | Swagger + documentation | ✅ |
 | 28 | Final production review | ⬜ |
 
 ## Phase 1 — Project architecture + configuration ✅
@@ -335,3 +335,9 @@ with `stop_grace_period` for draining, analytics consumer; secrets via `--env-fi
 call went from a container to the host's Ollama and was recorded in analytics, and the consumer container counted Kafka events.
 Image: 89 MB. **Bug found only in the container**: `create-admin` hard-coded the pretty logger, whose dev dependency isn't in the
 production image. The login rate limiter also (correctly) blocked the 6th login attempt during debugging.
+
+## Phase 27 — Swagger / OpenAPI ✅
+**Implemented**: a hand-written OpenAPI 3.1 spec (27 paths, auth, error model, schemas) served at `GET /openapi.json`, and Swagger
+UI at `GET /docs` (a relaxed CSP only for `/docs`, strict everywhere else). A route-inventory test walks Express's router and
+fails on any undocumented or phantom route (mutation-checked by removing one path).
+**Bugs found**: YAML values containing `: ` or `{id}` broke parsing, fixed by quoting.

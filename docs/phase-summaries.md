@@ -201,3 +201,11 @@ depending on who's inside it (the command). Park 5 kitchen trucks on a busy day 
 only happens **in the truck, not at home**: a tool that's only in the home kitchen (a dev dependency) was missing.
 **Remember:** one image for many roles, no secrets in images, non-root, health checks, graceful stop periods. Always
 smoke-test the actual container, because "works on my machine" bugs live exactly there.
+
+## Phase 27: Swagger / OpenAPI
+**Built:** the full API described in OpenAPI 3.1, browsable and clickable at `/docs` (with an Authorize button for the JWT).
+A test compares the spec with the routes the server really has, so documentation can't silently rot.
+**Real life:** the restaurant's **printed menu**. A **menu inspector** (the test) walks through the kitchen every morning:
+every dish the kitchen can make must be on the menu, and every dish on the menu must be makeable. When a dish was
+removed from the menu as a test, the inspector noticed immediately.
+**Remember:** documentation that isn't tested drifts. Contract tests keep the spec honest.
