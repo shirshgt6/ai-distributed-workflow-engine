@@ -5,13 +5,9 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phases 1–27 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
-> queue (retries, dead-lettering, crash recovery, heartbeats, pause/cancel, cron schedules, Kafka events). The AI layer has
-> provider abstraction, validated structured output, classification, model routing and RAG with Qdrant; see
-> [docs/ai-architecture.md](docs/ai-architecture.md) and [docs/rag.md](docs/rag.md).
-> See [docs/progress.md](docs/progress.md)
-> for exactly what is implemented, and [ARCHITECTURE.md](ARCHITECTURE.md)
-> for the target design.
+> **Status: all 28 phases complete.** 381 automated tests, a chaos test (workers killed + Redis restarted mid-run,
+> every task completed exactly once), and real-model checks against local Ollama. See [ARCHITECTURE.md](ARCHITECTURE.md),
+> [docs/progress.md](docs/progress.md) and, for interviews, [docs/interview-guide.md](docs/interview-guide.md).
 
 ## What works today
 
@@ -53,10 +49,12 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)
 
-## Tech stack (so far)
+## Tech stack
 
-Node.js (JavaScript, ES modules) · Express 5 · MongoDB 7 + Mongoose · Redis 7 +
-ioredis · zod · pino · bcryptjs · jsonwebtoken · Jest + Supertest · ESLint · Docker Compose
+Node.js (JavaScript, ES modules) · Express 5 · MongoDB 7 (replica set) + Mongoose · Redis 7 + ioredis (Lua scripts) ·
+Kafka (KRaft) + kafkajs · Qdrant · Ollama (qwen2.5:0.5b, nomic-embed-text) via an OpenAI-compatible API · LangChain.js
+text splitter · zod · pino · bcryptjs · jsonwebtoken · cron-parser · Jest + Supertest · ESLint · Docker / Compose ·
+OpenAPI 3.1 + Swagger UI
 
 ## Getting started
 

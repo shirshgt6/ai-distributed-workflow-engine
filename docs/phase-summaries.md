@@ -209,3 +209,14 @@ A test compares the spec with the routes the server really has, so documentation
 every dish the kitchen can make must be on the menu, and every dish on the menu must be makeable. When a dish was
 removed from the menu as a test, the inspector noticed immediately.
 **Remember:** documentation that isn't tested drifts. Contract tests keep the spec honest.
+
+## Phase 28: Final review + interview pack
+**Built:** a final pass over every document. ARCHITECTURE.md now describes the finished system, including a "not built" list.
+ADRs 022–031 were added, and the data model covers all 13 collections. The interview guide was rewritten with pitches,
+deep dives, failure scenarios, 120 Q&A, and coding, design and debugging prompts. Resume bullets use **only measured
+facts**, and a "never claim" list is included.
+**Real life:** the **restaurant inspection file**. Before the inspector comes, the owner writes down what the kitchen really does,
+the fire-drill results with real numbers, and, honestly, what it doesn't do yet ("no second branch, no night shift").
+An inspector trusts a restaurant that admits its limits more than one that claims to be perfect.
+**Remember:** in interviews, honesty about limits (at-least-once, single node, no benchmarks, weak 0.5B model) is a
+strength. Every claim should point to a test or a measurement.

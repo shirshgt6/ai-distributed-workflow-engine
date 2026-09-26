@@ -45,7 +45,7 @@ Short ADRs: context → decision → consequences. New decisions are appended.
 - **Consequences:** Simpler code (no "half-started" state). Relies on Docker
   restart policies / Kubernetes to retry with backoff.
 
-## ADR-006: Ollama as the local LLM provider (planned, Phase 13)
+## ADR-006: Ollama as the local LLM provider (implemented in Phase 13)
 
 - **Decision:** Use Ollama locally through its OpenAI-compatible API, plus a
   deterministic mock provider for tests. No paid API key required.
@@ -188,3 +188,43 @@ Short ADRs: context → decision → consequences. New decisions are appended.
   the request differs.
 - **Consequences:** Atomic, with no stuck "in progress" records and no extra collection. Keys never expire (fine at
   this scale; a TTL or cleanup job would be needed for high volume). This only covers run creation, not other POSTs.
+
+## ADR-022: Heartbeat-renewed short leases instead of timeout-length leases (Phase 10)
+- **Decision:** the running lease is `LEASE_TTL_MS` (15 s), renewed every TTL/3 while the handler runs. A lost renewal aborts the handler.
+- **Consequences:** a dead worker is detected in ≤ 15 s even for hour-long tasks. Renewal adds one small write per task every 5 s.
+
+## ADR-023: Transactional outbox for Kafka events (Phase 11)
+- **Decision:** events are rows written in the same transaction as the state change. A leader-elected relay publishes them, and consumers dedupe on eventId.
+- **Consequences:** no lost or phantom events. At-least-once delivery (never claim exactly-once). One extra write per state change.
+
+## ADR-024: Scheduler correctness from idempotency keys, not the lock (Phase 12)
+- **Decision:** leader election (a Redis lock) avoids duplicate work, and per-slot idempotency keys guarantee one run per slot. The order is start, then advance.
+- **Consequences:** even overlapping leaders produce one run (tested with three lock-less schedulers). There's no backfill after downtime.
+
+## ADR-025: Own provider interface over fetch; no vendor SDK, no LangChain chains (Phases 13, 19)
+- **Decision:** a ~100-line OpenAI-compatible provider, a mock, a fallback decorator and an observability decorator. LangChain is used only for the text splitter.
+- **Consequences:** full control of timeouts, error classification, retries and metrics, and any OpenAI-compatible backend works. We maintain the small adapter ourselves.
+
+## ADR-026: Validate every LLM output against a schema, repair, then refuse (Phase 14)
+- **Decision:** JSON mode + zod + up to 2 repair turns, then a non-retryable error. Enums are used for anything the model chooses (task types, tools, citations).
+- **Consequences:** downstream code never sees unvalidated model output, and prompt injection can't widen what the output may contain. It costs extra calls on invalid output.
+
+## ADR-027: Rule-based model routing (Phase 16)
+- **Decision:** the classification feeds deterministic first-match rules. There's no LLM router.
+- **Consequences:** free, instant, testable and explainable. Less flexible than a learned router.
+
+## ADR-028: One Qdrant collection per embedding model; tenant filter inside the query (Phase 18)
+- **Decision:** the collection name encodes model and dimension, and the `ownerId` payload index + filter is applied on every search. Embeddings never fall back to another model.
+- **Consequences:** vectors from different spaces can't mix, and isolation doesn't depend on post-filtering. A model change means re-embedding from MongoDB.
+
+## ADR-029: Bounded, read-only agent with code-enforced controls (Phase 20)
+- **Decision:** the tool allowlist is an enum, role permissions, ownerId from the task, zod args, per-tool timeouts, max iterations and a loop guard. No write, shell or network tools.
+- **Consequences:** safety doesn't depend on the model obeying the prompt. The agent's capabilities are deliberately narrow.
+
+## ADR-030: Approvals park tasks in MongoDB; decisions are CAS in one transaction (Phase 21)
+- **Decision:** `WAITING_FOR_APPROVAL` holds no worker or lock. The decision CAS, task transition, children and events are one transaction, reusing the normal success/failure helpers.
+- **Consequences:** waiting is free and survives restarts, and concurrent decisions have exactly one winner. There's no separation of duties yet.
+
+## ADR-031: Rate limiting as a Redis sliding-window log; auth fails closed (Phase 24)
+- **Decision:** one atomic Lua script per check. Login and registration refuse when Redis is down; other limits allow.
+- **Consequences:** exact limits under concurrency (tested 20 → 5), no boundary bursts, and brute-force protection that never silently disappears.
