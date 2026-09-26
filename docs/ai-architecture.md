@@ -1,6 +1,6 @@
 # AI architecture
 
-> Built so far: provider abstraction (13), structured output (14), classification (15), model routing (16), RAG (17–19, see [rag.md](rag.md)), controlled agent (20, see [agents.md](agents.md)), **fallback + circuit breaker (22)** and **observability (23, see [observability.md](observability.md))**.
+> Implemented: provider abstraction (13), structured output (14), classification (15), model routing (16), RAG (17–19, see [rag.md](rag.md)), controlled agent (20, see [agents.md](agents.md)), **fallback + circuit breaker (22)** and **observability (23, see [observability.md](observability.md))**.
 > Later sections are added as phases land.
 
 ## Provider abstraction (`src/ai/providers/`)

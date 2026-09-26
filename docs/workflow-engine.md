@@ -1,8 +1,8 @@
 # Workflow Engine
 
-> **Implemented so far (Phases 3–8):** state machines, the conditional transition primitive, the data model, DAG validation, **execution** (dependency resolution, fail-fast, reconciliation), and dispatch through a **Redis queue** with leases and takeover (see [redis.md](redis.md)).
-> Retries with backoff and dead-lettering (Phase 8) are covered below; separate worker processes (Phase 7) are covered in [redis.md](redis.md).
-> **Not implemented yet:** pause/resume/cancel endpoints, heartbeats (Phase 10), Kafka events, scheduling.
+> Covers the engine: definitions vs executions, state machines, DAG validation, execution, races, retries, recovery,
+> pause/resume/cancel (Phase 10) and approvals (Phase 21, see [human-in-the-loop.md](human-in-the-loop.md)). The queue and
+> workers are in [redis.md](redis.md), and events in [kafka.md](kafka.md).
 
 ## Definition vs execution
 

@@ -84,5 +84,19 @@ creation in the same insert as the run itself, so no separate IdempotencyRecord 
 
 This is an append-only attempt history. It replaces Project 1's growing embedded `history[]` array. One is created per claim and closed as SUCCEEDED, FAILED or TIMED_OUT.
 
-## Not yet created
-Worker (registry; Phase 10), ApprovalRequest, AIExecution, Document, KnowledgeChunk and OutboxEvent. Each arrives in the phase that uses it.
+## Collections added in Phases 10–23 (summary)
+| Collection | Key fields | Indexes | Why |
+|---|---|---|---|
+| **workers** | workerId, host, pid, status, runningTasks, tasksCompleted, lastSeenAt | workerId unique, lastSeenAt | registry for `GET /workers`. The live signal is the Redis TTL heartbeat key; correctness never depends on this collection |
+| **outboxevents** | eventId (uuid), type, aggregateId (executionId), payload, publishedAt | eventId unique; {publishedAt, _id}; TTL on publishedAt (7 d) | transactional outbox: written in the same transaction as the state change |
+| **processedevents** | consumer, eventId | {consumer, eventId} unique; TTL 30 d | idempotent Kafka consumer (the marker commits with the effect) |
+| **eventstats** | day, type, count | {day, type} unique | the analytics consumer's aggregate |
+| **approvalrequests** | taskId, executionId, ownerId, title, context, status, decidedBy, comment, expiresAt | taskId unique; {ownerId, status, createdAt}; {status, expiresAt} | human-in-the-loop; the PENDING → decided CAS gives one winner |
+| **aiexecutions** | operation, executionId, taskId, ownerId, taskType, provider, model, status, latencyMs, tokens, estimatedCostUsd, fallbackUsed | {ownerId, createdAt}, {model, createdAt}, executionId; TTL 90 d | LLM observability. No prompt text is stored |
+| **knowledgedocuments** | ownerId, title, contentHash, status, chunkCount, embeddingModel, vectorDims | {ownerId, contentHash} unique | RAG source documents (dedupe re-uploads) |
+| **knowledgechunks** | documentId, ownerId, index, text, pointId, embeddingModel | {documentId, index} unique | chunk text (truth, re-embeddable); `pointId` links to the Qdrant vector |
+
+Fields added to earlier collections: `workflows.schedule` {cron, timezone, enabled, input, nextRunAt, lastRunAt, lastError}
+(indexed for the scheduler); `workflowexecutions.trigger`, `idempotencyKey`, `requestHash` (unique partial index);
+`tasks.retryAt`. Qdrant holds the vectors: one collection per embedding model and dimension, payload
+{ownerId, documentId, chunkIndex, title, text}, with ownerId and documentId indexed.

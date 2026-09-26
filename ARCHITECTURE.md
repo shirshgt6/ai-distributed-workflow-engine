@@ -1,109 +1,81 @@
 # Architecture
 
-This document has two clearly separated parts:
+Everything described here is implemented and tested. Per-area detail lives in [docs/](docs/). What is **not** built
+is listed at the end.
 
-1. **Implemented** — what the code does today.
-2. **Target design** — the planned architecture. Nothing in part 2 should be
-   read as existing until [docs/progress.md](docs/progress.md) marks it done.
-
----
-
-## 1. Implemented (Phases 1–8 + idempotent runs)
-
+## System view
 ```
-            ┌────────────────────────────── API process (src/server.js) ─┐
- HTTP ───►  │ requestId → pino-http → helmet → express.json(limit)       │
-            │   → /health (liveness, no deps)                             │
-            │   → /ready  (readiness) ──► runHealthChecks (parallel,      │
-            │                              per-check timeout)             │
-            │   → /auth/*, /users/:id/role                                │
-            │       authenticate(JWT) → requirePermission(RBAC)           │
-            │       → validate(zod) → controller → authService            │
-            │   → /workflows[/:id]                                        │
-            │       authenticate → requirePermission → validate           │
-            │       → workflowService (validateDag, ownerScope, version CAS)│
-            │   → /workflows/:id/run, /executions/:id → executionService  │
-            │       → ENGINE (transactions, CAS, pendingTasks counter)    │
-            │            │ enqueue(taskId)          ▲ start/complete/fail │
-            │            ▼                          │                     │
-            └────────────┼──────────────────────────────────────────────┘
-                         ▼
-               REDIS QUEUE  ready / leases / delayed / members
-                         │  claim (Lua: pop + lease)     ▲ enqueueDelayed (retry backoff)
-            ┌────────────▼──────────────────────────────┴─────────────────┐
-            │ WORKER PROCESSES (npm run worker) × N, no leader            │
-            │   N claim loops → engine.startTask → handler (timeout)      │
-            │   → completeTask / failTask (retry | FAILED | DEAD_LETTER)  │
-            │   → ack last;  reaper + promoter;  reconciler; SIGTERM drain│
-            │   → notFound → errorHandler (uniform JSON errors)           │
-            └───────────────┬─────────────────────────┬───────────────────┘
-                            ▼                         ▼
-                 MongoDB 7 (replica set rs0)      Redis 7 (AOF, noeviction)
+                    ┌──────────────────────────── API (src/server.js) ─────────────────────────────┐
+ HTTP / JWT ──────► │ requestId → logs → helmet → body limits → rate limits → auth → RBAC → zod    │
+                    │ /auth /workflows(+schedule) /executions /approvals /documents /knowledge      │
+                    │ /analytics /workers /docs                                                     │
+                    │ ENGINE.startExecution: [Mongo txn] run + tasks + outbox event → enqueue       │
+                    └───────────────┬───────────────────────────────────────┬──────────────────────┘
+                                    ▼ enqueue(taskId)                        │ reads/writes
+            ┌────────── Redis ──────────────────────┐        ┌───────────── MongoDB (replica set) ─────────────┐
+            │ ready LIST · leases ZSET · delayed    │        │ SOURCE OF TRUTH: workflows, executions, tasks,  │
+            │ ZSET · members SET (Lua, atomic)      │        │ attempts, approvals, outbox, AI calls, docs,    │
+            │ locks (scheduler, relay) · heartbeats │        │ chunks, users, workers, event stats             │
+            │ rate-limit windows                    │        └──────────────────────────────────────────────────┘
+            └───────────────┬───────────────────────┘                 ▲
+                            ▼ claim (pop + lease)                      │ transactions, CAS, fencing
+       ┌──────────── WORKER processes × N (src/worker.js) ─────────────┴────────────────────────┐
+       │ claim loops → engine.startTask (lease, takeover) → handler (timeout, AbortSignal,         │
+       │ heartbeat renewal) → completeTask / failTask (retry·DLQ) / suspendForApproval → ack       │
+       │ + reaper/promoter · reconciler · scheduler (leader) · outbox relay (leader)                │
+       │ handlers: noop delay fail flaky echo human.approval ai.classify ai.route ai.generate       │
+       │           ai.rag ai.agent                                                                   │
+       └───────┬──────────────────────────────┬──────────────────────────────┬─────────────────────┘
+               ▼ provider interface            ▼ vectors                      ▼ outbox relay
+   observed(fallback([Ollama | any           Qdrant (collection per       Kafka "workflow-events"
+   OpenAI-compatible], breakers))            embedding model; ownerId      → analytics consumer
+   → AIExecution rows                        filter in every query)          (idempotent)
 ```
 
-**Key design points**
+## Responsibilities (each technology has one job)
+| Component | Job | Why this and not something else |
+|---|---|---|
+| **MongoDB** | Durable state; the single source of truth | document-shaped workflows, atomic conditional updates, multi-document transactions (replica set) |
+| **Redis** | Coordination: which task next, leases, delayed retries, locks, heartbeats, rate limits | in-memory atomic ops + Lua. Rebuildable from MongoDB by the reconciler |
+| **Kafka** | Lifecycle *events* for independent consumers | replayable log, consumer groups, per-key ordering. **Not** the task queue (no ack/visibility timeout/delay) |
+| **Qdrant** | Vector similarity search for RAG | purpose-built ANN index + payload filters for tenant isolation |
+| **Engine** | Dependency resolution and state transitions | a set of functions, not a process, so there's no orchestrator single point of failure |
+| **Workers** | Execute handlers | stateless processes, scaled horizontally |
+| **AI layer** | Provider abstraction, validation, routing, RAG, agent, fallback, observability | business code depends on an interface, never a vendor |
 
-- **Composition root.** `server.js` is the only file that reads config and
-  opens connections. `createApp()` receives everything it needs as arguments,
-  so tests build the app with fake dependencies and no infrastructure.
-- **Fail fast at boot.** Invalid config or an unreachable Mongo/Redis at
-  startup exits the process with code 1. A process supervisor (Docker,
-  Kubernetes) is responsible for restarting.
-- **Liveness ≠ readiness.** `/health` never checks dependencies (avoids restart
-  storms during a DB outage); `/ready` does, and also returns 503 while the
-  process is shutting down so a load balancer drains it first.
-- **Fail fast at runtime too.** The Redis client has its offline queue
-  disabled: while Redis is down, commands error immediately instead of
-  queueing in memory.
-- **Mongo as a replica set** (even single-node) so multi-document
-  transactions are available when the outbox pattern arrives.
-- **Redis `noeviction`** so a full Redis rejects writes rather than silently
-  deleting queue data.
-- **Auth is stateless on the hot path.** Access JWTs are verified by signature
-  only (no DB hit per request). Revocation happens at refresh time through
-  `user.tokenVersion`. Details and trade-offs are in [docs/security.md](docs/security.md).
-- **Authorization is split in two.** RBAC (the permission table) answers "may this
-  role do this action?". Ownership checks answer "is this object yours?" and
-  live in the query itself (`ownerScope`), so a foreign resource is a 404.
-- **Explicit state machines + compare-and-set.** Every task status change is
-  checked against a transition table *and* applied with a conditional update
-  (`{ status: from }`), so racing actors can't both win. See
-  [docs/workflow-engine.md](docs/workflow-engine.md).
-- **Definitions vs executions.** Workflows are versioned definitions. A run copies
-  each task's type and config into its own Task documents (the snapshot).
-- **No central orchestrator.** Whoever finishes a task runs the engine's
-  completion transaction, which releases the children. All state is in MongoDB,
-  so a crashed process loses nothing that recovery can't rebuild. Details, including
-  every race and its fix, are in [docs/workflow-engine.md](docs/workflow-engine.md).
-- **Redis is coordination, MongoDB is truth.** Redis holds only task ids (ready list,
-  leases, delayed set). Every multi-step queue move is one Lua script, so a task id
-  can never be "popped and lost". If Redis and MongoDB disagree, the reconciler makes
-  Redis match MongoDB. See [docs/redis.md](docs/redis.md).
-- **Leases + fencing for crash recovery.** A claimed task carries a lease
-  (`timeoutMs + grace`, on the database's clock). If it expires, another worker takes
-  over with a new `leaseToken`, and the dead worker's late report is rejected.
-- **Separate worker processes.** The API only starts runs. Workers are stateless and
-  coordinate only through Redis (who takes what) and MongoDB (state), so scaling out
-  means starting more of them. There's no leader and no registration.
-- **Retries belong to the task, not the queue.** A failed attempt is classified (transient
-  or not), and retried with exponential backoff and full jitter until `maxAttempts`, then
-  dead-lettered. Takeovers count as attempts, which guards against poison pills.
-- **Idempotency lives on the resource.** The `Idempotency-Key` is stored on the execution
-  under a unique index, so "create the run" and "remember the key" are one atomic insert. Data model details are in
-  [docs/database-design.md](docs/database-design.md).
+## Correctness mechanisms (where the interview depth is)
+- **Transactions** for every multi-document state change: start a run, complete or fail a task, approvals, pause/resume/cancel,
+  and outbox rows.
+- **Compare-and-set** (`{ status: expected }` in the filter) for every single-document transition, so racing actors have exactly one winner.
+- **Fencing tokens** (`leaseToken`) so a stale worker's late report is rejected.
+- **Leases + heartbeats**: a dead worker's task is taken over after ≤ `LEASE_TTL_MS`.
+- **Atomic Redis scripts**: claim = pop + lease, so a task id is never lost; plus reaper, dedupe, rate limits and locks.
+- **Write-skew prevention**: the `pendingTasks` counter on the execution makes concurrent final completions conflict.
+- **Idempotency**: runs (key on the execution under a unique index), scheduled slots, consumers (processed-event table), enqueue (members set).
+- **Transactional outbox**: an event is written with its state change. At-least-once delivery, deduplicated consumers.
+- **Reconciler**: MongoDB is the truth; READY/QUEUED/RUNNING/RETRYING stragglers and expired approvals are repaired.
 
-## 2. Target design (not implemented yet)
+Verified by race tests, mutation checks, crash-simulation tests and a chaos test (see [docs/testing.md](docs/testing.md)).
 
-Responsibilities each technology WILL have — each has exactly one job:
-
-| Component | Responsibility |
+## Where to read more
+| Topic | Doc |
 |---|---|
-| MongoDB | Durable source of truth for workflows, executions, tasks, approvals, AI calls |
-| Redis | Fast coordination: ready queue, leases, delayed jobs, locks, rate limits, heartbeats (rebuildable from Mongo) |
-| Kafka | Stream of lifecycle events for analytics/audit consumers (at-least-once) — not a task queue |
-| Workflow engine | Dependency resolution: decide which tasks are ready |
-| Workers | Execute task handlers under a lease, separate processes |
-| AI layer | Provider abstraction (Ollama via OpenAI-compatible API + mock), routing, RAG (Qdrant), bounded agent |
+| Engine, states, DAG, races | [docs/workflow-engine.md](docs/workflow-engine.md) |
+| Queue, leases, locks | [docs/redis.md](docs/redis.md) |
+| Events | [docs/kafka.md](docs/kafka.md) |
+| AI layer | [docs/ai-architecture.md](docs/ai-architecture.md), [docs/rag.md](docs/rag.md), [docs/agents.md](docs/agents.md) |
+| Human approval | [docs/human-in-the-loop.md](docs/human-in-the-loop.md) |
+| Security | [docs/security.md](docs/security.md) |
+| Observability | [docs/observability.md](docs/observability.md) |
+| Data model | [docs/database-design.md](docs/database-design.md) |
+| API | [docs/api-design.md](docs/api-design.md) · live at `/docs` |
+| Decisions | [docs/decisions.md](docs/decisions.md) |
+| Interview prep | [docs/interview-guide.md](docs/interview-guide.md) · [docs/phase-summaries.md](docs/phase-summaries.md) |
 
-The phase plan and progress live in [docs/progress.md](docs/progress.md);
-design decisions in [docs/decisions.md](docs/decisions.md).
+## Not built (by design or out of scope)
+- **High availability:** single-node MongoDB, Redis, Kafka and Qdrant locally. Production needs replicas.
+- **OpenTelemetry tracing and Prometheus metrics:** correlation ids plus MongoDB analytics instead.
+- **Exactly-once end-to-end processing:** at-least-once delivery with state changes applied once.
+- **PDF/DOCX extraction, re-ranking, hybrid search, RAG evaluation sets.**
+- **Refresh-token rotation, separation of duties for approvals, CORS configuration.**
+- **Useful answers from the 0.5B local model** for citations and agents: the controls work, but a larger model is needed.
