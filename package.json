@@ -22,7 +22,9 @@
     "infra:down": "docker compose -f docker/docker-compose.yml down",
     "test:llm": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects llm --runInBand",
     "check:secrets": "node scripts/check-secrets.js",
-    "audit": "npm audit --omit=dev"
+    "audit": "npm audit --omit=dev",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects unit integration --runInBand --coverage --coverageReporters=text-summary --coverageReporters=json-summary --collectCoverageFrom=\"src/**/*.js\" --collectCoverageFrom=\"!src/server.js\" --collectCoverageFrom=\"!src/worker.js\" --collectCoverageFrom=\"!src/consumers/**\"",
+    "chaos": "node scripts/chaos.js"
   },
   "keywords": [
     "workflow",
