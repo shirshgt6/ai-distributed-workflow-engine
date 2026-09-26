@@ -28,7 +28,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 22 | AI retry/fallback | ✅ |
 | 23 | LLM observability + analytics | ✅ |
 | 24 | Security hardening | ✅ |
-| 25 | Testing hardening (chaos tests) | ⬜ |
+| 25 | Testing hardening (chaos tests) | ✅ |
 | 26 | Docker Compose for app services | ⬜ |
 | 27 | Swagger + documentation | ⬜ |
 | 28 | Final production review | ⬜ |
@@ -318,3 +318,10 @@ despite a 200 KB schema limit. Added `npm run check:secrets` and `npm run audit`
 docs/security.md.
 **Tests**: 373 total, including the limiter race (20 → exactly 5), sliding recovery, brute force + spraying, fail-closed vs
 fail-open, NoSQL injection, body limits, and prompt injection with an *obedient* model.
+
+## Phase 25 — Testing hardening ✅
+**Implemented**: `npm run test:coverage`, `npm run chaos` (real API + 3 workers; kill -9 workers and restart Redis during runs;
+invariants checked in MongoDB), and registry/factory tests (a coverage gap: `GET /workers` had 0% coverage).
+**Measured**: coverage 93.2% statements / 78.3% branches / 95.0% lines. Chaos: 40 runs × 7 tasks with 14 worker kills + a Redis
+restart, every invariant held (exactly one successful attempt and one completion event per task). See docs/testing.md.
+**Honest note**: one unidentified flaky failure in 1 of 3 coverage runs.

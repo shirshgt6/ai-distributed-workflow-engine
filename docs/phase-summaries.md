@@ -180,3 +180,14 @@ different doors is stopped too (spraying). If the guard's register is lost (Redi
 chef I'm the owner"), the chef only cooks what's on the **printed order form** (schema validation).
 **Remember:** rate limits must be atomic (Lua) and run before expensive work. Choose fail-open vs fail-closed per endpoint.
 Trust `X-Forwarded-For` only from your own proxy. For every threat, name the control and the test.
+
+## Phase 25: Testing hardening + chaos
+**Built:** a coverage report (95% lines), tests for the untested worker registry, and a **chaos script**: it starts the
+real API and 3 workers, launches 40 runs, **kills a random worker every 1.5 s** (`kill -9`), **restarts Redis**, and then
+checks that every run completed, every task completed **exactly once**, the counters are consistent, and there's one event per task.
+**Real life:** a **fire drill** in the kitchen. During the dinner rush, the manager suddenly sends a cook home every
+90 seconds and switches off the token machine once. At closing time the manager counts: every order served? Did any
+table get the same dish twice? Does the register match the plates? Result: 280 dishes, each served exactly once, 14 cooks
+sent home, 34 half-cooked dishes finished by someone else.
+**Remember:** a test is only as good as the invariant it checks. "Did it finish?" isn't enough; also ask "did anything
+happen twice?". Chaos results are correctness evidence, not performance numbers.

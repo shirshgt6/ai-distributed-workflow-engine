@@ -5,7 +5,7 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phases 1–24 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
+> **Status: Phases 1–25 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
 > queue (retries, dead-lettering, crash recovery, heartbeats, pause/cancel, cron schedules, Kafka events). The AI layer has
 > provider abstraction, validated structured output, classification, model routing and RAG with Qdrant; see
 > [docs/ai-architecture.md](docs/ai-architecture.md) and [docs/rag.md](docs/rag.md).
@@ -111,6 +111,8 @@ other local projects using the default ports.
 | `npm run test:integration` | Integration tests against real Mongo/Redis (`infra:up` first) |
 | `npm run test:all` | Unit + integration |
 | `npm run test:llm` | Real-model tests against local Ollama (opt-in) |
+| `npm run test:coverage` | Unit + integration with coverage |
+| `npm run chaos` | Kill workers + restart Redis during 20 runs, then verify invariants (see [docs/testing.md](docs/testing.md)) |
 | `npm run lint` | ESLint |
 | `npm run check:secrets` | Scan tracked files for secrets (patterns + local `.env` values) |
 | `npm run audit` | `npm audit` for production dependencies |
