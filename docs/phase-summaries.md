@@ -126,3 +126,17 @@ card is relevant, the honest answer is "we don't know", never a guess.
 **Remember:** RAG reduces hallucination by grounding plus citations plus refusal, but doesn't eliminate it. Filter tenants
 inside the vector query. One collection per embedding model. Use libraries for utilities (the splitter) and your own code for
 control flow. Small models are weak at citing, so validate and refuse.
+
+## Phase 20: Controlled AI agent
+**Built:** an agent that can **use tools**: search the knowledge base, check a workflow's status, and a safe calculator. The
+model only *proposes* "call calculator with (18-5)*2". Our code checks that the tool is on the allowlist, the owner's role
+permits it and the arguments are valid, then runs it with a timeout and shows the result, until the model gives a final answer.
+It stops after max steps, on a repeated identical call, or on timeout or cancel. There's no shell, internet, files or eval, ever.
+**Real life:** a **trainee cook** who may use exactly three things: the recipe library, the order board, and a calculator. The
+trainee can't walk into the storeroom (the tool isn't on the list), can only look at **this restaurant's** orders (scope comes
+from the shift, not from what the trainee says), and has to show their work step by step. If the trainee asks for the same
+calculation twice in a row, or takes more than 5 steps, the head chef says **"stop, we'll handle it"**. Our real trainee
+(the 0.5B model) did the right calculation (26) and then asked for it again, so the supervisor stopped it. The rules worked;
+the trainee needs more training (a bigger model).
+**Remember:** agent = loop + tools + stopping conditions. Safety lives in code (allowlist, permissions, scope, validation,
+limits), never in the prompt. Tool results are untrusted input.

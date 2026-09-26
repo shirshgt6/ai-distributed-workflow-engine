@@ -27,6 +27,7 @@ import { createMockProvider } from "../../src/ai/providers/mock.js";
 import { createVectorStore } from "../../src/ai/rag/vectorStore.js";
 import { createRagPipeline } from "../../src/ai/rag/pipeline.js";
 import { KnowledgeDocument, KnowledgeChunk } from "../../src/models/knowledge.model.js";
+import { createToolRegistry } from "../../src/ai/agent/tools.js";
 
 export const MONGO_URI =
   process.env.MONGO_URI_TEST ?? "mongodb://localhost:27018/workflow_engine_test?directConnection=true";
@@ -66,7 +67,12 @@ export function createTestStack({
 } = {}) {
   const vectorStore = createVectorStore({ url: QDRANT_URL, prefix: `test_${randomUUID().slice(0, 8)}` });
   const rag = createRagPipeline({ provider: llm, vectorStore, models: TEST_MODELS, KnowledgeDocument, KnowledgeChunk, logger, minScore: 0.1, ...ragOptions });
-  const handlers = { ...builtinHandlers, ...createAiHandlers({ provider: llm, models: TEST_MODELS, logger, rag }) };
+  const tools = createToolRegistry({ rag, WorkflowExecution, Task });
+  const getUserRole = async (userId) => (await User.findById(userId).select("role").lean())?.role ?? null;
+  const handlers = {
+    ...builtinHandlers,
+    ...createAiHandlers({ provider: llm, models: TEST_MODELS, logger, rag, tools, getUserRole }),
+  };
   const redis = createRedisClient(REDIS_URL, logger, { name: "test-stack" });
   const queue = createTaskQueue(redis, { prefix: `test:${randomUUID()}` });
   const authService = createAuthService({ User, tokens, bcryptCost: BCRYPT_COST });

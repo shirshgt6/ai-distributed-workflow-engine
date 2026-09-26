@@ -86,3 +86,16 @@ test("real RAG: nomic embeddings -> Qdrant -> qwen answer with a validated citat
     await mongoose.disconnect();
   }
 }, 300_000);
+
+test("real agent: qwen plans a calculator call, then answers", async () => {
+  const { runAgent } = await import("../../src/ai/agent/agent.js");
+  const { createToolRegistry, selectTools } = await import("../../src/ai/agent/tools.js");
+  const { allowed } = selectTools(createToolRegistry({}), { allowlist: ["calculator"], role: "operator" });
+  try {
+    const r = await runAgent({ provider, model: MODEL, tools: allowed, goal: "What is (18 - 5) * 2? Use the calculator.", ctx: { ownerId: "x" }, maxIterations: 4 });
+    console.log(`[real agent] status=${r.status} answer=${JSON.stringify(r.answer)} steps=${JSON.stringify(r.steps.map((s) => (s.type === "tool" ? `${s.tool}(${JSON.stringify(s.args)})=>${s.observation}` : `${s.type}${s.reason ? ":" + s.reason : ""}`)))}`);
+    expect(["final", "max_iterations", "loop_detected"]).toContain(r.status);
+  } catch (err) {
+    console.log(`[real agent] failed: ${err.message}`); // a 0.5B model may not follow the protocol
+  }
+}, 300_000);

@@ -14,6 +14,8 @@ import { handlers as builtinHandlers } from "./handlers/index.js";
 import { createAiHandlers } from "./handlers/ai.js";
 import { createProviderFromConfig } from "./ai/providers/index.js";
 import { createRagFromConfig } from "./ai/rag/index.js";
+import { createToolRegistry } from "./ai/agent/tools.js";
+import { User } from "./models/user.model.js";
 import { Worker } from "./models/worker.model.js";
 import { createWorkerRegistry } from "./workers/registry.js";
 import { OutboxEvent } from "./models/outboxEvent.model.js";
@@ -48,7 +50,12 @@ async function main() {
   // Built-in handlers + AI handlers (which receive the LLM provider).
   const llm = createProviderFromConfig(config.llm);
   const { rag } = createRagFromConfig({ config, provider: llm, logger });
-  const handlers = { ...builtinHandlers, ...createAiHandlers({ provider: llm, models: config.llm.models, logger, rag }) };
+  const tools = createToolRegistry({ rag, WorkflowExecution, Task });
+  const getUserRole = async (userId) => (await User.findById(userId).select("role").lean())?.role ?? null;
+  const handlers = {
+    ...builtinHandlers,
+    ...createAiHandlers({ provider: llm, models: config.llm.models, logger, rag, tools, getUserRole }),
+  };
   const engine = createEngine({
     models: { WorkflowExecution, Task, TaskExecution, OutboxEvent },
     enqueue: (item) => queue.enqueue(item.taskId),
