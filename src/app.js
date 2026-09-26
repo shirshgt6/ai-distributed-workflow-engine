@@ -32,7 +32,10 @@ import { createAnalyticsRouter } from "./routes/analytics.routes.js";
  *   admin?: { listWorkers: () => Promise<object[]> },
  *   knowledge?: { rag: object, KnowledgeDocument: object },
  *   approvals?: { engine: object, ApprovalRequest: object },
- *   analyticsService?: object
+ *   analyticsService?: object,
+ *   rateLimiters?: ReturnType<import('./middleware/rateLimit.js').createRateLimiters>,
+ *   trustProxy?: boolean | number | string,
+ *   documentBodyLimit?: string
  * }} deps
  *   auth / workflowService are optional so tests that only exercise
  *   health/errors don't need to build the whole stack. Workflow routes need
@@ -50,11 +53,18 @@ export function createApp({
   knowledge,
   approvals,
   analyticsService,
+  rateLimiters,
+  trustProxy = false,
+  documentBodyLimit = "256kb",
 }) {
   const app = express();
 
   // Don't advertise the framework (X-Powered-By: Express) to scanners.
   app.disable("x-powered-by");
+  // req.ip (used by rate limits) must be the CLIENT's address. Behind a load
+  // balancer that's in X-Forwarded-For, but that header is attacker-controlled
+  // unless we only trust the proxy hops we actually run (TRUST_PROXY).
+  app.set("trust proxy", trustProxy);
 
   // ORDER MATTERS: middleware runs top to bottom.
   // 1. requestId first, so every later log line can include it.
@@ -85,24 +95,33 @@ export function createApp({
 
   // 4. JSON body parsing with a size cap. Without a limit, one client can
   //    POST a huge body and make the process buffer it all in memory.
-  app.use(express.json({ limit: bodyLimit }));
+  //    Document uploads are the one endpoint that legitimately needs more.
+  const jsonDefault = express.json({ limit: bodyLimit });
+  const jsonDocuments = express.json({ limit: documentBodyLimit });
+  app.use((req, res, next) =>
+    req.method === "POST" && req.path === "/documents" ? jsonDocuments(req, res, next) : jsonDefault(req, res, next)
+  );
 
   // 5. Routes.
   app.use(healthRouter({ checks, isShuttingDown, logger }));
   if (auth) {
-    const authenticate = createAuthenticate(auth.tokens);
-    app.use(createAuthRouter({ authService: auth.authService, authenticate }));
+    // Every authenticated route also gets the per-user API rate limit.
+    const verifyToken = createAuthenticate(auth.tokens);
+    const authenticate = rateLimiters
+      ? (req, res, next) => verifyToken(req, res, (err) => (err ? next(err) : rateLimiters.api(req, res, next)))
+      : verifyToken;
+    app.use(createAuthRouter({ authService: auth.authService, authenticate, rateLimiters }));
     if (workflowService) {
       app.use(createWorkflowRouter({ workflowService, authenticate }));
     }
     if (executionService) {
-      app.use(createExecutionRouter({ executionService, authenticate }));
+      app.use(createExecutionRouter({ executionService, authenticate, rateLimiters }));
     }
     if (admin) {
       app.use(createAdminRouter({ authenticate, ...admin }));
     }
     if (knowledge) {
-      app.use(createKnowledgeRouter({ authenticate, ...knowledge }));
+      app.use(createKnowledgeRouter({ authenticate, rateLimiters, ...knowledge }));
     }
     if (approvals) {
       app.use(createApprovalRouter({ authenticate, ...approvals }));

@@ -19,6 +19,14 @@ const envSchema = z.object({
   REDIS_URL: z.string().regex(/^rediss?:\/\//, "must start with redis:// or rediss://"),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   BODY_LIMIT: z.string().regex(/^\d+(b|kb|mb)$/, "must look like 100kb / 1mb").default("100kb"),
+  DOCUMENT_BODY_LIMIT: z.string().regex(/^\d+(b|kb|mb)$/, "must look like 256kb / 1mb").default("256kb"),
+  // Security (Phase 24)
+  RATE_LIMIT_ENABLED: z.enum(["true", "false"]).default("true").transform((v) => v === "true"),
+  // Express "trust proxy": false (direct), a hop count (e.g. 1 behind one load balancer), or a subnet list.
+  TRUST_PROXY: z
+    .string()
+    .default("false")
+    .transform((v) => (v === "false" ? false : v === "true" ? true : /^\d+$/.test(v) ? Number(v) : v)),
 
   // HS256 signs with a shared secret; a short secret can be brute-forced
   // offline from any one token an attacker sees. 32+ chars ~ 256 bits when random.
@@ -132,6 +140,8 @@ export function loadConfig(source = process.env) {
     redis: Object.freeze({ url: env.REDIS_URL }),
     shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS,
     bodyLimit: env.BODY_LIMIT,
+    documentBodyLimit: env.DOCUMENT_BODY_LIMIT,
+    security: Object.freeze({ rateLimitEnabled: env.RATE_LIMIT_ENABLED, trustProxy: env.TRUST_PROXY }),
     auth: Object.freeze({
       accessSecret: env.JWT_ACCESS_SECRET,
       refreshSecret: env.JWT_REFRESH_SECRET,

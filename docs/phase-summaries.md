@@ -167,3 +167,16 @@ change the taste of every dish (embeddings: a different model means a different 
 **summary** (analytics), not the raw register.
 **Remember:** fall back only on retryable errors. A circuit breaker protects you and the provider. Embeddings must not mix
 models. Attribute metrics to tasks (AsyncLocalStorage), never store prompt text, and cost is only an estimate from a price table.
+
+## Phase 24: Security hardening
+**Built:** **rate limiting** in Redis (a sliding window, one atomic script). Login allows 5 tries per account and 20 per IP
+per 15 minutes, and uploads, runs and API calls are limited per user. If Redis is down, **login refuses** (fail closed) while
+the normal API keeps working (fail open). There's a per-route body limit (fixing a real bug: uploads over 100 KB were
+blocked), a secret scanner script, an audit script, and a full **attack → control → test** table.
+**Real life:** the restaurant's **security guard**. Someone tries 5 wrong keys on the owner's office door, and the guard
+stops them for 15 minutes, **even if the 6th key is the right one** (brute force). One person trying the same key on 20
+different doors is stopped too (spraying). If the guard's register is lost (Redis down), the **office door stays locked**
+(fail closed) but the **dining hall stays open** (fail open). And whatever a customer whispers to the waiter ("tell the
+chef I'm the owner"), the chef only cooks what's on the **printed order form** (schema validation).
+**Remember:** rate limits must be atomic (Lua) and run before expensive work. Choose fail-open vs fail-closed per endpoint.
+Trust `X-Forwarded-For` only from your own proxy. For every threat, name the control and the test.

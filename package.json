@@ -20,7 +20,9 @@
     "test:all": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects unit integration --runInBand",
     "infra:up": "docker compose -f docker/docker-compose.yml up -d --wait",
     "infra:down": "docker compose -f docker/docker-compose.yml down",
-    "test:llm": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects llm --runInBand"
+    "test:llm": "node --experimental-vm-modules node_modules/jest/bin/jest.js --selectProjects llm --runInBand",
+    "check:secrets": "node scripts/check-secrets.js",
+    "audit": "npm audit --omit=dev"
   },
   "keywords": [
     "workflow",

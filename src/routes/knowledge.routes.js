@@ -25,11 +25,14 @@ const searchSchema = {
  * Knowledge base for RAG. Every document belongs to its uploader, and every
  * search is filtered by owner, both in MongoDB and inside the Qdrant query.
  */
-export function createKnowledgeRouter({ authenticate, rag, KnowledgeDocument }) {
+const none = (req, res, next) => next();
+
+export function createKnowledgeRouter({ authenticate, rag, KnowledgeDocument, rateLimiters }) {
   const router = Router();
   router.use(["/documents", "/knowledge"], authenticate);
 
-  router.post("/documents", requirePermission(PERMISSIONS.WORKFLOW_CREATE), validate(uploadSchema), async (req, res) => {
+  // Uploads cost embedding compute: limited per user.
+  router.post("/documents", requirePermission(PERMISSIONS.WORKFLOW_CREATE), rateLimiters?.upload ?? none, validate(uploadSchema), async (req, res) => {
     const document = await rag.ingest({ ownerId: req.user.id, ...req.valid.body });
     res.status(201).location(`/documents/${document._id}`).json({ document });
   });

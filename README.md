@@ -5,7 +5,7 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phases 1–23 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
+> **Status: Phases 1–24 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
 > queue (retries, dead-lettering, crash recovery, heartbeats, pause/cancel, cron schedules, Kafka events). The AI layer has
 > provider abstraction, validated structured output, classification, model routing and RAG with Qdrant; see
 > [docs/ai-architecture.md](docs/ai-architecture.md) and [docs/rag.md](docs/rag.md).
@@ -47,6 +47,8 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
   [docs/human-in-the-loop.md](docs/human-in-the-loop.md)
 - **LLM resilience + observability**: fallback provider chain with circuit breakers; every LLM call recorded (tokens, latency,
   cost, fallback); `GET /analytics/ai`, `GET /analytics/workflows`, see [docs/observability.md](docs/observability.md)
+- **Security**: Redis rate limiting (brute force, spraying, per-user quotas), threat model with tests, see
+  [docs/security.md](docs/security.md)
 - **Cron schedules** (`PUT /workflows/:id/schedule`): leader-elected scheduler, one run per slot guaranteed by idempotency keys
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)
@@ -110,6 +112,8 @@ other local projects using the default ports.
 | `npm run test:all` | Unit + integration |
 | `npm run test:llm` | Real-model tests against local Ollama (opt-in) |
 | `npm run lint` | ESLint |
+| `npm run check:secrets` | Scan tracked files for secrets (patterns + local `.env` values) |
+| `npm run audit` | `npm audit` for production dependencies |
 | `npm run create-admin` | Create or promote an admin (reads `ADMIN_EMAIL` / `ADMIN_PASSWORD`) |
 | `npm run infra:up` / `infra:down` | Start / stop local infrastructure |
 

@@ -15,13 +15,16 @@ const runSchema = {
 };
 const executionIdSchema = { params: z.object({ id: objectId }) };
 
-export function createExecutionRouter({ executionService, authenticate }) {
+const none = (req, res, next) => next();
+
+export function createExecutionRouter({ executionService, authenticate, rateLimiters }) {
   const c = createExecutionController(executionService);
   const router = Router();
 
   router.post(
     "/workflows/:id/run",
     authenticate,
+    rateLimiters?.run ?? none, // starting runs is the expensive operation
     requirePermission(PERMISSIONS.WORKFLOW_RUN),
     validate(runSchema),
     c.run
