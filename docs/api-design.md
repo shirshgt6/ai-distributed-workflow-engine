@@ -96,3 +96,14 @@ The execution belongs to the **workflow's owner** (so they can see it), and `tri
 | GET | `/approvals/:id` | `workflow:read` | — | 200 `{ approval }` incl. `context` (parents' outputs); 404 if not yours |
 | POST | `/approvals/:id/approve` | `approval:decide` | `{ comment? }` | 200 `{ approval }`; **409 `ALREADY_DECIDED`** (race/expired/cancelled) |
 | POST | `/approvals/:id/reject` | `approval:decide` | `{ comment? }` | same |
+
+### Analytics (`analytics:read`; own data, admin: all)
+| Method | Path | Query | Returns |
+|---|---|---|---|
+| GET | `/analytics/ai` | `days=1..90` (7) | totals, per provider/model/operation (calls, errorRate, fallbacks, avg/p95 latency, tokens, estimated cost), per task type |
+| GET | `/analytics/workflows` | `days=1..90` (7) | executions by status, successRate, duration avg/p95, attempts/retries/abandoned, top failing task types |
+
+### Admin
+| Method | Path | Permission | Returns |
+|---|---|---|---|
+| GET | `/workers` | `user:manage` | worker registry: ACTIVE / UNRESPONSIVE / STOPPED, running tasks, last heartbeat |

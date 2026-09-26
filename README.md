@@ -5,7 +5,7 @@ graphs) of tasks — with parallel execution of independent tasks, persistent
 state, retries, crash recovery, lifecycle events, and AI-powered task types
 (LLM routing, RAG, controlled agents, human approval).
 
-> **Status: Phases 1–21 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
+> **Status: Phases 1–23 complete.** Workflows run on separate, horizontally scalable workers through a reliable Redis
 > queue (retries, dead-lettering, crash recovery, heartbeats, pause/cancel, cron schedules, Kafka events). The AI layer has
 > provider abstraction, validated structured output, classification, model routing and RAG with Qdrant; see
 > [docs/ai-architecture.md](docs/ai-architecture.md) and [docs/rag.md](docs/rag.md).
@@ -45,6 +45,8 @@ state, retries, crash recovery, lifecycle events, and AI-powered task types
 - **RAG**: `POST /documents` (chunk + embed + Qdrant), owner-isolated retrieval, cited and validated answers
 - **Human-in-the-loop**: `human.approval` tasks park a run until `POST /approvals/:id/approve|reject` or the timeout, see
   [docs/human-in-the-loop.md](docs/human-in-the-loop.md)
+- **LLM resilience + observability**: fallback provider chain with circuit breakers; every LLM call recorded (tokens, latency,
+  cost, fallback); `GET /analytics/ai`, `GET /analytics/workflows`, see [docs/observability.md](docs/observability.md)
 - **Cron schedules** (`PUT /workflows/:id/schedule`): leader-elected scheduler, one run per slot guaranteed by idempotency keys
 - See [docs/api-design.md](docs/api-design.md), [docs/security.md](docs/security.md),
   [docs/database-design.md](docs/database-design.md), [docs/workflow-engine.md](docs/workflow-engine.md)

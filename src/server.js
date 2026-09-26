@@ -19,6 +19,8 @@ import { OutboxEvent } from "./models/outboxEvent.model.js";
 import { ApprovalRequest } from "./models/approval.model.js";
 import { listWorkers } from "./workers/registry.js";
 import { createProviderFromConfig } from "./ai/providers/index.js";
+import { AIExecution } from "./models/aiExecution.model.js";
+import { createAnalyticsService } from "./services/analytics.service.js";
 import { createRagFromConfig } from "./ai/rag/index.js";
 import { KnowledgeDocument } from "./models/knowledge.model.js";
 import { createExecutionService } from "./services/execution.service.js";
@@ -55,7 +57,7 @@ async function main() {
   });
   const executionService = createExecutionService({ Workflow, WorkflowExecution, Task, engine });
   // RAG: document upload + search (ingestion embeds via the LLM provider).
-  const llm = createProviderFromConfig(config.llm);
+  const llm = createProviderFromConfig(config.llm, { AIExecution, logger });
   const { rag, vectorStore } = createRagFromConfig({ config, provider: llm, logger });
 
   // The API only STARTS runs (MongoDB + enqueue to Redis). Tasks are executed
@@ -79,6 +81,7 @@ async function main() {
     admin: { listWorkers: () => listWorkers({ Worker, redis }) },
     knowledge: { rag, KnowledgeDocument },
     approvals: { engine, ApprovalRequest },
+    analyticsService: createAnalyticsService({ WorkflowExecution, Task, TaskExecution, AIExecution }),
   });
 
   const server = app.listen(config.port, () => {

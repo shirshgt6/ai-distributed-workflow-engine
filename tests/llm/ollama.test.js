@@ -99,3 +99,19 @@ test("real agent: qwen plans a calculator call, then answers", async () => {
     console.log(`[real agent] failed: ${err.message}`); // a 0.5B model may not follow the protocol
   }
 }, 300_000);
+
+test("real fallback: primary unreachable -> circuit opens -> Ollama answers as the fallback", async () => {
+  const { createFallbackProvider } = await import("../../src/ai/providers/fallback.js");
+  const dead = createOpenAICompatibleProvider({ name: "dead-primary", baseUrl: "http://127.0.0.1:1", timeoutMs: 2000 });
+  const p = createFallbackProvider({ entries: [{ provider: dead }, { provider, mapModel: () => MODEL }], breaker: { failureThreshold: 2, cooldownMs: 60_000 } });
+  const msgs = [{ role: "user", content: "Reply with the single word: pong" }];
+  const results = [];
+  for (let i = 0; i < 3; i++) {
+    const started = Date.now();
+    const r = await p.chat({ model: "whatever", messages: msgs });
+    results.push({ provider: r.provider, fallbackUsed: r.fallbackUsed, ms: Date.now() - started, circuit: p.chain[0].breaker.state });
+  }
+  console.log(`[real fallback] ${JSON.stringify(results)}`);
+  expect(results.every((r) => r.provider === "ollama" && r.fallbackUsed)).toBe(true);
+  expect(results[2].circuit).toBe("OPEN");
+}, 300_000);
