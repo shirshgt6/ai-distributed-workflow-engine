@@ -1,6 +1,7 @@
 import { withTimeout } from "../utils/withTimeout.js";
 import { NonRetryableError } from "./retry.js";
 import { AwaitApproval } from "./approval.js";
+import { withAiContext } from "../ai/observability.js";
 
 /**
  * Run ONE already-claimed task's handler and report the outcome to the engine.
@@ -33,7 +34,11 @@ export async function runTask({ claimed, engine, handlers, logger, signal }) {
     output = await withTimeout(
       // Promise.resolve().then(): a handler that throws synchronously becomes
       // a rejected promise instead of escaping withTimeout.
-      Promise.resolve().then(() =>
+      // AI observability context: every LLM call made by this handler is
+      // attributed to this execution / task / owner (see ai/observability.js).
+      withAiContext(
+        { executionId: task.executionId, taskId: task._id, ownerId: task.ownerId, taskType: task.type },
+        () => Promise.resolve().then(() =>
         handler({
           config: task.config ?? {},
           input,
@@ -42,7 +47,7 @@ export async function runTask({ claimed, engine, handlers, logger, signal }) {
           ownerId: String(task.ownerId), // whose data this run may touch (RAG, agent tools)
           signal: controller.signal,
         })
-      ),
+      )),
       task.timeoutMs,
       `task "${task.key}"`
     );

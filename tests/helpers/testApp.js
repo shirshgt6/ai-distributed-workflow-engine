@@ -29,6 +29,9 @@ import { createVectorStore } from "../../src/ai/rag/vectorStore.js";
 import { createRagPipeline } from "../../src/ai/rag/pipeline.js";
 import { KnowledgeDocument, KnowledgeChunk } from "../../src/models/knowledge.model.js";
 import { createToolRegistry } from "../../src/ai/agent/tools.js";
+import { createObservedProvider } from "../../src/ai/observability.js";
+import { AIExecution } from "../../src/models/aiExecution.model.js";
+import { createAnalyticsService } from "../../src/services/analytics.service.js";
 
 export const MONGO_URI =
   process.env.MONGO_URI_TEST ?? "mongodb://localhost:27018/workflow_engine_test?directConnection=true";
@@ -65,14 +68,17 @@ export function createTestStack({
   withRegistry = false,
   llm = createMockProvider(),
   ragOptions = {},
+  pricing = {},
 } = {}) {
+  // Same stack as production: every LLM call goes through the observability decorator.
+  const observed = createObservedProvider(llm, { AIExecution, pricing, logger });
   const vectorStore = createVectorStore({ url: QDRANT_URL, prefix: `test_${randomUUID().slice(0, 8)}` });
-  const rag = createRagPipeline({ provider: llm, vectorStore, models: TEST_MODELS, KnowledgeDocument, KnowledgeChunk, logger, minScore: 0.1, ...ragOptions });
+  const rag = createRagPipeline({ provider: observed, vectorStore, models: TEST_MODELS, KnowledgeDocument, KnowledgeChunk, logger, minScore: 0.1, ...ragOptions });
   const tools = createToolRegistry({ rag, WorkflowExecution, Task });
   const getUserRole = async (userId) => (await User.findById(userId).select("role").lean())?.role ?? null;
   const handlers = {
     ...builtinHandlers,
-    ...createAiHandlers({ provider: llm, models: TEST_MODELS, logger, rag, tools, getUserRole }),
+    ...createAiHandlers({ provider: observed, models: TEST_MODELS, logger, rag, tools, getUserRole }),
   };
   const redis = createRedisClient(REDIS_URL, logger, { name: "test-stack" });
   const queue = createTaskQueue(redis, { prefix: `test:${randomUUID()}` });
@@ -109,6 +115,7 @@ export function createTestStack({
     admin: { listWorkers: () => listWorkers({ Worker, redis }) },
     knowledge: { rag, KnowledgeDocument },
     approvals: { engine, ApprovalRequest },
+    analyticsService: createAnalyticsService({ WorkflowExecution, Task, TaskExecution, AIExecution }),
   });
 
   return {

@@ -56,6 +56,25 @@ const envSchema = z.object({
   LLM_MODEL_LARGE: z.string().default("qwen2.5:0.5b"),
   EMBEDDING_MODEL: z.string().default("nomic-embed-text"),
   LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(60_000),
+  // Optional secondary provider used when the primary is down (Phase 22).
+  LLM_FALLBACK_BASE_URL: z.string().url().optional(),
+  LLM_FALLBACK_API_KEY: z.string().optional(),
+  LLM_FALLBACK_MODEL: z.string().optional(),
+  // Circuit breaker: open after N consecutive failures, retry after the cooldown.
+  LLM_BREAKER_FAILURES: z.coerce.number().int().min(1).default(3),
+  LLM_BREAKER_COOLDOWN_MS: z.coerce.number().int().min(1000).default(30_000),
+  // Cost estimation: {"model": {"inputPer1M": 0.15, "outputPer1M": 0.6}} in USD. Unknown models cost 0.
+  LLM_PRICING_JSON: z
+    .string()
+    .default("{}")
+    .transform((raw, ctx) => {
+      try {
+        return z.record(z.string(), z.object({ inputPer1M: z.number().min(0), outputPer1M: z.number().min(0) })).parse(JSON.parse(raw));
+      } catch {
+        ctx.addIssue({ code: "custom", message: 'must be JSON like {"model":{"inputPer1M":0.15,"outputPer1M":0.6}}' });
+        return z.NEVER;
+      }
+    }),
   // RAG (Phase 17-18)
   QDRANT_URL: z.string().url().default("http://localhost:6333"),
   RAG_CHUNK_SIZE: z.coerce.number().int().min(100).max(8000).default(800),
@@ -145,6 +164,12 @@ export function loadConfig(source = process.env) {
       apiKey: env.LLM_API_KEY,
       models: Object.freeze({ small: env.LLM_MODEL_SMALL, large: env.LLM_MODEL_LARGE, embedding: env.EMBEDDING_MODEL }),
       timeoutMs: env.LLM_TIMEOUT_MS,
+      fallback:
+        env.LLM_FALLBACK_BASE_URL && env.LLM_FALLBACK_MODEL
+          ? Object.freeze({ baseUrl: env.LLM_FALLBACK_BASE_URL, apiKey: env.LLM_FALLBACK_API_KEY, model: env.LLM_FALLBACK_MODEL })
+          : null,
+      breaker: Object.freeze({ failureThreshold: env.LLM_BREAKER_FAILURES, cooldownMs: env.LLM_BREAKER_COOLDOWN_MS }),
+      pricing: env.LLM_PRICING_JSON,
     }),
     reconciler: Object.freeze({ intervalMs: env.RECONCILE_INTERVAL_MS, staleMs: env.RECONCILE_STALE_MS }),
   });

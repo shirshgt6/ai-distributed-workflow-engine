@@ -25,8 +25,8 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 19 | LangChain.js integration | ✅ |
 | 20 | Controlled AI agents + tools | ✅ |
 | 21 | Human-in-the-loop | ✅ |
-| 22 | AI retry/fallback | ⬜ |
-| 23 | LLM observability + analytics | ⬜ |
+| 22 | AI retry/fallback | ✅ |
+| 23 | LLM observability + analytics | ✅ |
 | 24 | Security hardening | ⬜ |
 | 25 | Testing hardening (chaos tests) | ⬜ |
 | 26 | Docker Compose for app services | ⬜ |
@@ -302,3 +302,10 @@ expires overdue approvals; cancel closes pending approvals; `GET /approvals`, `G
 `POST /approvals/:id/approve|reject`. The engine was refactored so approvals reuse `afterTaskSucceeded` / `afterTaskFailedForGood`.
 **Tests**: 348 total. The e2e covers park (no worker held), approve → resume → complete, reject → fail-fast, a 6-way approve/reject race
 → one winner, timeout → expired, cancel while waiting, and authorization. **Mutation**: removing the PENDING CAS was caught by the race test.
+
+## Phases 22–23 — AI fallback + circuit breaker; LLM observability + analytics ✅
+**Implemented**: `createCircuitBreaker`, `createFallbackProvider` (retryable-only fallback, model mapping, no embedding fallback),
+`createObservedProvider` + AsyncLocalStorage task attribution, the `AIExecution` model, cost from `LLM_PRICING_JSON`, an optional
+secondary provider via `LLM_FALLBACK_*`, and `GET /analytics/ai` and `GET /analytics/workflows` (p95 via `$percentile`).
+**Tests**: 363 total (breaker transitions, fallback rules, cost maths, config validation, attribution + analytics e2e with scoping).
+Real-model fallback demo with circuit opening.

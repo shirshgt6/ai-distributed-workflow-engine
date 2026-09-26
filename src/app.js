@@ -11,6 +11,7 @@ import { createExecutionRouter } from "./routes/execution.routes.js";
 import { createAdminRouter } from "./routes/admin.routes.js";
 import { createKnowledgeRouter } from "./routes/knowledge.routes.js";
 import { createApprovalRouter } from "./routes/approval.routes.js";
+import { createAnalyticsRouter } from "./routes/analytics.routes.js";
 
 /**
  * Build the Express app WITHOUT starting a server or connecting to anything.
@@ -30,7 +31,8 @@ import { createApprovalRouter } from "./routes/approval.routes.js";
  *   executionService?: object,
  *   admin?: { listWorkers: () => Promise<object[]> },
  *   knowledge?: { rag: object, KnowledgeDocument: object },
- *   approvals?: { engine: object, ApprovalRequest: object }
+ *   approvals?: { engine: object, ApprovalRequest: object },
+ *   analyticsService?: object
  * }} deps
  *   auth / workflowService are optional so tests that only exercise
  *   health/errors don't need to build the whole stack. Workflow routes need
@@ -47,6 +49,7 @@ export function createApp({
   admin,
   knowledge,
   approvals,
+  analyticsService,
 }) {
   const app = express();
 
@@ -103,6 +106,9 @@ export function createApp({
     }
     if (approvals) {
       app.use(createApprovalRouter({ authenticate, ...approvals }));
+    }
+    if (analyticsService) {
+      app.use(createAnalyticsRouter({ authenticate, analyticsService }));
     }
   }
 

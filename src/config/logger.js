@@ -14,6 +14,7 @@ const REDACT_PATHS = [
   "*.refreshToken",
   "*.apiKey",
   "*.LLM_API_KEY",
+  "*.LLM_FALLBACK_API_KEY",
 ];
 
 /**

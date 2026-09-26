@@ -1,6 +1,6 @@
 # AI architecture
 
-> Built so far: provider abstraction (13), structured output (14), classification (15), model routing (16), RAG (17–19, see [rag.md](rag.md)), **controlled agent (20, see [agents.md](agents.md))**.
+> Built so far: provider abstraction (13), structured output (14), classification (15), model routing (16), RAG (17–19, see [rag.md](rag.md)), controlled agent (20, see [agents.md](agents.md)), **fallback + circuit breaker (22)** and **observability (23, see [observability.md](observability.md))**.
 > Later sections are added as phases land.
 
 ## Provider abstraction (`src/ai/providers/`)
@@ -72,3 +72,16 @@ there's no cost difference to measure yet.
 (uses the parent route's model, and refuses non-direct routes with a clear non-retryable error). They're ordinary workflow
 tasks, so dependencies, retries (a `ProviderError.retryable` timeout is retried with backoff), timeouts, cancellation and
 events all apply unchanged.
+
+## Retry, fallback and circuit breaker (Phase 22)
+Provider stack: `observed( fallback( [primary, optional secondary] ) )`, built in `src/ai/providers/index.js`.
+- **Retryable** failure (network, timeout, 429, 5xx) → try the next provider. **Non-retryable** (400/401/404) → throw
+  immediately, because falling back would hide a bad request.
+- Everything down → a retryable `ProviderError`, so the **task** retries later with exponential backoff (Phase 8).
+- **Circuit breaker** per provider (in-process): N consecutive failures → OPEN (calls refused instantly) → after the cooldown,
+  HALF_OPEN (exactly one trial) → CLOSED on success / OPEN on failure.
+- **Embeddings never fall back:** a different embedding model means a different vector space, so mixing them would corrupt retrieval.
+- Classification additionally falls back to a keyword heuristic (Phase 15), marked `source: "heuristic"`.
+- **Real demo** (`npm run test:llm`): primary at a dead URL, Ollama as the secondary. Calls 1–2 hit the dead primary then fell
+  back. After the 2nd failure the circuit opened, and call 3 skipped the primary entirely (18 ms vs 616 ms for the first call,
+  which included model warm-up). This is one local run, not a benchmark.

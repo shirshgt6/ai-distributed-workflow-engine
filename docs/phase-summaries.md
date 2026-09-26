@@ -153,3 +153,17 @@ order is closed. The slip has a **24-hour stamp**: unsigned by then, it's void. 
 at once, **the first signature on the slip counts**, and the second person sees "already signed".
 **Remember:** waiting must not hold a worker or a lock. The decision is a compare-and-set, one winner. The decision and its
 effects are one transaction. Approve/reject reuse the same success/failure code as normal tasks.
+
+## Phases 22–23: AI fallback + observability
+**Built:** a **fallback chain** of LLM providers with a **circuit breaker** each. If the primary keeps failing, stop calling
+it for a while, and a second provider (if configured) answers. Every LLM call is **recorded**: which task, model, tokens,
+latency, cost, whether fallback was used. Dashboards: `GET /analytics/ai` (per model: calls, error rate, p95 latency, tokens,
+cost) and `GET /analytics/workflows` (success rate, durations, retries, what fails most).
+**Real life:** the kitchen's **gas supplier** fails. The manager calls the **backup supplier**. After the main supplier fails
+twice in a row, the manager **stops calling them for 30 minutes** (circuit open) instead of wasting time on every order, then
+makes **one test call** to see if they're back (half-open). But the **spice mix never falls back to another brand**: it would
+change the taste of every dish (embeddings: a different model means a different vector space). And every cylinder used is
+**logged in the register**: which dish, which supplier, how long, how much it cost. At month end the owner reads the
+**summary** (analytics), not the raw register.
+**Remember:** fall back only on retryable errors. A circuit breaker protects you and the provider. Embeddings must not mix
+models. Attribute metrics to tasks (AsyncLocalStorage), never store prompt text, and cost is only an estimate from a price table.

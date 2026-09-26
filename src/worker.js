@@ -13,6 +13,7 @@ import { createQueueWorker } from "./workers/queueWorker.js";
 import { handlers as builtinHandlers } from "./handlers/index.js";
 import { createAiHandlers } from "./handlers/ai.js";
 import { createProviderFromConfig } from "./ai/providers/index.js";
+import { AIExecution } from "./models/aiExecution.model.js";
 import { createRagFromConfig } from "./ai/rag/index.js";
 import { createToolRegistry } from "./ai/agent/tools.js";
 import { User } from "./models/user.model.js";
@@ -49,7 +50,7 @@ async function main() {
 
   const queue = createTaskQueue(redis);
   // Built-in handlers + AI handlers (which receive the LLM provider).
-  const llm = createProviderFromConfig(config.llm);
+  const llm = createProviderFromConfig(config.llm, { AIExecution, logger });
   const { rag } = createRagFromConfig({ config, provider: llm, logger });
   const tools = createToolRegistry({ rag, WorkflowExecution, Task });
   const getUserRole = async (userId) => (await User.findById(userId).select("role").lean())?.role ?? null;
