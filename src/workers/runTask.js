@@ -1,5 +1,6 @@
 import { withTimeout } from "../utils/withTimeout.js";
 import { NonRetryableError } from "./retry.js";
+import { AwaitApproval } from "./approval.js";
 
 /**
  * Run ONE already-claimed task's handler and report the outcome to the engine.
@@ -55,6 +56,9 @@ export async function runTask({ claimed, engine, handlers, logger, signal }) {
   if (failure) {
     log.warn({ err: failure.message, latencyMs }, "task failed");
     await engine.failTask({ taskId, leaseToken: task.leaseToken, error: failure });
+  } else if (output instanceof AwaitApproval) {
+    log.info({ latencyMs }, "task waiting for human approval");
+    await engine.suspendForApproval({ taskId, leaseToken: task.leaseToken, request: output.request });
   } else {
     log.info({ latencyMs }, "task completed");
     await engine.completeTask({ taskId, leaseToken: task.leaseToken, output: output ?? null });

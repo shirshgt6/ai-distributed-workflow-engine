@@ -88,3 +88,11 @@ The execution belongs to the **workflow's owner** (so they can see it), and `tri
 - same key + different request → **422 `IDEMPOTENCY_KEY_REUSED`**
 - keys are scoped per user. The check is a unique index on `(triggeredBy, idempotencyKey)` of the execution itself,
   so concurrent duplicates also produce exactly one run (tested with 5 simultaneous requests).
+
+### Approvals (human-in-the-loop)
+| Method | Path | Permission | Body | Success |
+|---|---|---|---|---|
+| GET | `/approvals?status=` | `workflow:read` | — | 200 `{ approvals }` (own runs; admin: all) |
+| GET | `/approvals/:id` | `workflow:read` | — | 200 `{ approval }` incl. `context` (parents' outputs); 404 if not yours |
+| POST | `/approvals/:id/approve` | `approval:decide` | `{ comment? }` | 200 `{ approval }`; **409 `ALREADY_DECIDED`** (race/expired/cancelled) |
+| POST | `/approvals/:id/reject` | `approval:decide` | `{ comment? }` | same |

@@ -140,3 +140,16 @@ calculation twice in a row, or takes more than 5 steps, the head chef says **"st
 the trainee needs more training (a bigger model).
 **Remember:** agent = loop + tools + stopping conditions. Safety lives in code (allowlist, permissions, scope, validation,
 limits), never in the prompt. Tool results are untrusted input.
+
+## Phase 21: Human-in-the-loop
+**Built:** a `human.approval` task that **parks** the run ("AI suggests a ₹50,000 refund, a manager must approve"). The
+worker is freed; the wait is just a row in MongoDB. `POST /approvals/:id/approve` resumes the run (the next task gets the
+decision), and `reject` fails it (fail-fast). No answer before the timeout means it expires. Two people clicking at once:
+exactly one decision counts.
+**Real life:** a big catering order needs the **owner's signature** before the kitchen buys ₹50,000 of ingredients. The cook
+puts the order slip in the **"awaiting signature" tray** and goes back to other dishes; nobody stands waiting. The owner signs
+(approve), and shopping starts, with the slip showing who signed and why. Or the owner writes "NO, suspicious" (reject), and the
+order is closed. The slip has a **24-hour stamp**: unsigned by then, it's void. If the owner and the manager both grab the pen
+at once, **the first signature on the slip counts**, and the second person sees "already signed".
+**Remember:** waiting must not hold a worker or a lock. The decision is a compare-and-set, one winner. The decision and its
+effects are one transaction. Approve/reject reuse the same success/failure code as normal tasks.

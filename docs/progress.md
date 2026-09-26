@@ -24,7 +24,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 18 | Qdrant retrieval | ✅ |
 | 19 | LangChain.js integration | ✅ |
 | 20 | Controlled AI agents + tools | ✅ |
-| 21 | Human-in-the-loop | ⬜ |
+| 21 | Human-in-the-loop | ✅ |
 | 22 | AI retry/fallback | ⬜ |
 | 23 | LLM observability + analytics | ⬜ |
 | 24 | Security hardening | ⬜ |
@@ -294,3 +294,11 @@ loop guard, overall timeout and abort); read-only tools (knowledge search, workf
 ownerId; `selectTools` (allowlist ∩ registry ∩ role); the `ai.agent` handler (no answer → non-retryable failure).
 **Tests**: 341 total. **Real model**: correct tool call, then a repeated call, stopped by the loop guard (3/3). The model is too small
 to finish; see docs/agents.md.
+
+## Phase 21 — Human-in-the-loop ✅
+**Implemented**: the `human.approval` handler (returns `AwaitApproval`); `engine.suspendForApproval` (transactional park, worker
+freed); `engine.resolveApproval` (CAS decision + task transition + shared success/fail helpers, in one transaction); the reconciler
+expires overdue approvals; cancel closes pending approvals; `GET /approvals`, `GET /approvals/:id`,
+`POST /approvals/:id/approve|reject`. The engine was refactored so approvals reuse `afterTaskSucceeded` / `afterTaskFailedForGood`.
+**Tests**: 348 total. The e2e covers park (no worker held), approve → resume → complete, reject → fail-fast, a 6-way approve/reject race
+→ one winner, timeout → expired, cancel while waiting, and authorization. **Mutation**: removing the PENDING CAS was caught by the race test.
