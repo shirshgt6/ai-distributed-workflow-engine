@@ -20,6 +20,7 @@ import { createQueueWorker } from "../../src/workers/queueWorker.js";
 import { createWorkerRegistry, listWorkers } from "../../src/workers/registry.js";
 import { Worker } from "../../src/models/worker.model.js";
 import { OutboxEvent } from "../../src/models/outboxEvent.model.js";
+import { ApprovalRequest } from "../../src/models/approval.model.js";
 import { createExecutionService } from "../../src/services/execution.service.js";
 import { handlers as builtinHandlers } from "../../src/handlers/index.js";
 import { createAiHandlers } from "../../src/handlers/ai.js";
@@ -78,7 +79,7 @@ export function createTestStack({
   const authService = createAuthService({ User, tokens, bcryptCost: BCRYPT_COST });
   const workflowService = createWorkflowService({ Workflow });
   const engine = createEngine({
-    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent },
+    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent, ApprovalRequest },
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
@@ -107,6 +108,7 @@ export function createTestStack({
     executionService,
     admin: { listWorkers: () => listWorkers({ Worker, redis }) },
     knowledge: { rag, KnowledgeDocument },
+    approvals: { engine, ApprovalRequest },
   });
 
   return {

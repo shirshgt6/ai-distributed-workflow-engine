@@ -16,6 +16,7 @@ import { createEngine } from "./workflow/engine.js";
 import { createTaskQueue } from "./queues/taskQueue.js";
 import { Worker } from "./models/worker.model.js";
 import { OutboxEvent } from "./models/outboxEvent.model.js";
+import { ApprovalRequest } from "./models/approval.model.js";
 import { listWorkers } from "./workers/registry.js";
 import { createProviderFromConfig } from "./ai/providers/index.js";
 import { createRagFromConfig } from "./ai/rag/index.js";
@@ -46,7 +47,7 @@ async function main() {
   // Redis only holds "which task id to pick up next".
   const queue = createTaskQueue(redis);
   const engine = createEngine({
-    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent },
+    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent, ApprovalRequest },
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,
@@ -77,6 +78,7 @@ async function main() {
     executionService,
     admin: { listWorkers: () => listWorkers({ Worker, redis }) },
     knowledge: { rag, KnowledgeDocument },
+    approvals: { engine, ApprovalRequest },
   });
 
   const server = app.listen(config.port, () => {

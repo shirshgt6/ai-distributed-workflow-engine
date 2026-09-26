@@ -8,6 +8,7 @@ export const ATTEMPT_STATUS = Object.freeze({
   FAILED: "FAILED",
   TIMED_OUT: "TIMED_OUT",
   ABANDONED: "ABANDONED", // worker disappeared (lease expired) — Phase 10
+  SUSPENDED: "SUSPENDED", // handed over to a human (WAITING_FOR_APPROVAL) — Phase 21
 });
 
 // One ATTEMPT of one task. Append-only history: a task retried 3 times has

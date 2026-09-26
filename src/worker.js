@@ -19,6 +19,7 @@ import { User } from "./models/user.model.js";
 import { Worker } from "./models/worker.model.js";
 import { createWorkerRegistry } from "./workers/registry.js";
 import { OutboxEvent } from "./models/outboxEvent.model.js";
+import { ApprovalRequest } from "./models/approval.model.js";
 import { createLock } from "./queues/lock.js";
 import { createOutboxRelay, createRelayRunner } from "./events/relay.js";
 import { createKafkaPublisher } from "./events/kafka.js";
@@ -57,7 +58,7 @@ async function main() {
     ...createAiHandlers({ provider: llm, models: config.llm.models, logger, rag, tools, getUserRole }),
   };
   const engine = createEngine({
-    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent },
+    models: { WorkflowExecution, Task, TaskExecution, OutboxEvent, ApprovalRequest },
     enqueue: (item) => queue.enqueue(item.taskId),
     enqueueDelayed: (item, delayMs) => queue.enqueueDelayed(item.taskId, delayMs),
     logger,

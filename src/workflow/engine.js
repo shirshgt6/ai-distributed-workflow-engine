@@ -4,7 +4,7 @@ import { validateDag } from "./dag.js";
 import { assertTransition, EXECUTION_STATUS as E, TASK_STATUS as T } from "./states.js";
 import { claimTask, renewTaskLease, transitionTask } from "../repositories/task.repository.js";
 import { ATTEMPT_STATUS } from "../models/taskExecution.model.js";
-import { ValidationError } from "../utils/errors.js";
+import { ConflictError, ValidationError } from "../utils/errors.js";
 import { computeBackoff, isRetryable } from "../workers/retry.js";
 
 /**
@@ -24,7 +24,7 @@ import { computeBackoff, isRetryable } from "../workers/retry.js";
  * Redis queue (src/queues/taskQueue.js); workers pull from there.
  *
  * @param {{
- *   models: { WorkflowExecution, Task, TaskExecution, OutboxEvent? },
+ *   models: { WorkflowExecution, Task, TaskExecution, OutboxEvent?, ApprovalRequest? },
  *   enqueue: (item: { taskId: string, executionId: string, key: string }) => void | Promise<void>,
  *   enqueueDelayed?: (item: { taskId: string }, delayMs: number) => void | Promise<void>,
  *   logger: import('pino').Logger,
@@ -45,7 +45,7 @@ export function createEngine({
   backoff = computeBackoff,
   connection = mongoose.connection,
 }) {
-  const { WorkflowExecution, Task, TaskExecution, OutboxEvent } = models;
+  const { WorkflowExecution, Task, TaskExecution, OutboxEvent, ApprovalRequest } = models;
 
   const now = () => new Date();
 
@@ -115,6 +115,106 @@ export function createEngine({
     } catch (err) {
       logger.warn({ taskId: String(task._id), err: err.message }, "scheduling retry failed; the reconciler will retry");
     }
+  }
+
+
+  /**
+   * Everything that follows a task SUCCEEDING, inside the caller's
+   * transaction: pendingTasks - 1, children's remainingDeps - 1 (promoted to
+   * READY while the run is RUNNING), run completion, events. Shared by
+   * completeTask and approved human approvals so both follow one tested path.
+   */
+  async function afterTaskSucceeded(session, task, finishedAt) {
+    const execution = await WorkflowExecution.findOneAndUpdate(
+      { _id: task.executionId },
+      { $inc: { pendingTasks: -1 } },
+      { returnDocument: "after", session }
+    );
+
+    const live = execution.status === E.RUNNING || execution.status === E.PAUSED;
+    if (live && task.dependents.length > 0) {
+      await Task.updateMany(
+        { executionId: task.executionId, key: { $in: task.dependents } },
+        { $inc: { remainingDeps: -1 } },
+        { session }
+      );
+      // While PAUSED, children keep remainingDeps 0 but stay PENDING;
+      // resumeExecution promotes them.
+      if (execution.status === E.RUNNING) {
+        assertTransition("task", T.PENDING, T.READY);
+        await Task.updateMany(
+          { executionId: task.executionId, key: { $in: task.dependents }, status: T.PENDING, remainingDeps: 0 },
+          { $set: { status: T.READY, readyAt: finishedAt } },
+          { session }
+        );
+      }
+    }
+
+    if (execution.status === E.RUNNING && execution.pendingTasks === 0) {
+      assertTransition("execution", E.RUNNING, E.COMPLETED);
+      await WorkflowExecution.updateOne(
+        { _id: execution._id, status: E.RUNNING },
+        { $set: { status: E.COMPLETED, completedAt: finishedAt } },
+        { session }
+      );
+      await emit(session, "execution.completed", execution._id);
+      logger.info({ executionId: String(execution._id) }, "execution completed");
+    }
+
+    await emit(session, "task.completed", task.executionId, {
+      taskId: String(task._id),
+      key: task.key,
+      attempt: task.attempt,
+      durationMs: task.startedAt ? finishedAt - task.startedAt : null,
+    });
+  }
+
+  /**
+   * Everything that follows a task failing FOR GOOD (FAILED / DEAD_LETTER),
+   * inside the caller's transaction: pendingTasks - 1 and FAIL-FAST (cancel
+   * unstarted tasks, run -> FAILED), plus events. Shared by failTask and
+   * rejected / expired approvals.
+   */
+  async function afterTaskFailedForGood(session, task, { outcome, message, retryable, finishedAt }) {
+    const updated = await WorkflowExecution.findOneAndUpdate(
+      { _id: task.executionId },
+      { $inc: { pendingTasks: -1 } },
+      { returnDocument: "after", session }
+    );
+
+    if (updated.status === E.RUNNING || updated.status === E.PAUSED) {
+      const cancelled = await Task.updateMany(
+        { executionId: task.executionId, status: { $in: [T.PENDING, T.READY, T.QUEUED, T.RETRYING] } },
+        { $set: { status: T.CANCELLED, completedAt: finishedAt } },
+        { session }
+      );
+      const why =
+        outcome === T.DEAD_LETTER
+          ? `failed after ${task.attempt} attempt(s) and was dead-lettered`
+          : "failed";
+      assertTransition("execution", updated.status, E.FAILED);
+      await WorkflowExecution.updateOne(
+        { _id: updated._id, status: updated.status },
+        {
+          $set: { status: E.FAILED, error: `Task "${task.key}" ${why}: ${message}`, completedAt: finishedAt },
+          $inc: { pendingTasks: -cancelled.modifiedCount },
+        },
+        { session }
+      );
+      await emit(session, "execution.failed", updated._id, { failedTask: task.key, error: message });
+      logger.warn(
+        { executionId: String(updated._id), taskKey: task.key, outcome, cancelled: cancelled.modifiedCount },
+        "execution failed (fail-fast)"
+      );
+    }
+
+    await emit(session, outcome === T.DEAD_LETTER ? "task.dead_lettered" : "task.failed", task.executionId, {
+      taskId: String(task._id),
+      key: task.key,
+      attempt: task.attempt,
+      error: message,
+      retryable,
+    });
   }
 
   const engine = {
@@ -214,6 +314,13 @@ export function createEngine({
           { $set: { status: E.CANCELLED, completedAt: now(), error: "Cancelled by user" }, $inc: { pendingTasks: -r.modifiedCount } },
           { session }
         );
+        if (ApprovalRequest) {
+          await ApprovalRequest.updateMany(
+            { executionId, status: "PENDING" },
+            { $set: { status: "CANCELLED", decidedAt: now() } },
+            { session }
+          );
+        }
         await emit(session, "execution.cancelled", executionId, { cancelledTasks: r.modifiedCount });
         cancelled = true;
       });
@@ -430,48 +537,7 @@ export function createEngine({
           { session }
         );
 
-        const execution = await WorkflowExecution.findOneAndUpdate(
-          { _id: task.executionId },
-          { $inc: { pendingTasks: -1 } },
-          { returnDocument: "after", session }
-        );
-
-        const live = execution.status === E.RUNNING || execution.status === E.PAUSED;
-        if (live && task.dependents.length > 0) {
-          await Task.updateMany(
-            { executionId: task.executionId, key: { $in: task.dependents } },
-            { $inc: { remainingDeps: -1 } },
-            { session }
-          );
-          // While PAUSED, children keep remainingDeps 0 but stay PENDING;
-          // resumeExecution promotes them.
-          if (execution.status === E.RUNNING) {
-            assertTransition("task", T.PENDING, T.READY);
-            await Task.updateMany(
-              { executionId: task.executionId, key: { $in: task.dependents }, status: T.PENDING, remainingDeps: 0 },
-              { $set: { status: T.READY, readyAt: finishedAt } },
-              { session }
-            );
-          }
-        }
-
-        if (execution.status === E.RUNNING && execution.pendingTasks === 0) {
-          assertTransition("execution", E.RUNNING, E.COMPLETED);
-          await WorkflowExecution.updateOne(
-            { _id: execution._id, status: E.RUNNING },
-            { $set: { status: E.COMPLETED, completedAt: finishedAt } },
-            { session }
-          );
-          await emit(session, "execution.completed", execution._id);
-          logger.info({ executionId: String(execution._id) }, "execution completed");
-        }
-
-        await emit(session, "task.completed", task.executionId, {
-          taskId: String(task._id),
-          key: task.key,
-          attempt: task.attempt,
-          durationMs: task.startedAt ? finishedAt - task.startedAt : null,
-        });
+        await afterTaskSucceeded(session, task, finishedAt);
         applied = true;
       });
 
@@ -571,45 +637,7 @@ export function createEngine({
           await transitionTask(taskId, T.FAILED, T.DEAD_LETTER, { session });
         }
 
-        const updated = await WorkflowExecution.findOneAndUpdate(
-          { _id: task.executionId },
-          { $inc: { pendingTasks: -1 } },
-          { returnDocument: "after", session }
-        );
-
-        if (updated.status === E.RUNNING || updated.status === E.PAUSED) {
-          const cancelled = await Task.updateMany(
-            { executionId: task.executionId, status: { $in: [T.PENDING, T.READY, T.QUEUED, T.RETRYING] } },
-            { $set: { status: T.CANCELLED, completedAt: finishedAt } },
-            { session }
-          );
-          const why =
-            outcome === T.DEAD_LETTER
-              ? `failed after ${task.attempt} attempt(s) and was dead-lettered`
-              : "failed";
-          assertTransition("execution", updated.status, E.FAILED);
-          await WorkflowExecution.updateOne(
-            { _id: updated._id, status: updated.status },
-            {
-              $set: { status: E.FAILED, error: `Task "${task.key}" ${why}: ${message}`, completedAt: finishedAt },
-              $inc: { pendingTasks: -cancelled.modifiedCount },
-            },
-            { session }
-          );
-          await emit(session, "execution.failed", updated._id, { failedTask: task.key, error: message });
-          logger.warn(
-            { executionId: String(updated._id), taskKey: task.key, outcome, cancelled: cancelled.modifiedCount },
-            "execution failed (fail-fast)"
-          );
-        }
-
-        await emit(session, outcome === T.DEAD_LETTER ? "task.dead_lettered" : "task.failed", task.executionId, {
-          taskId: String(task._id),
-          key: task.key,
-          attempt: task.attempt,
-          error: message,
-          retryable,
-        });
+        await afterTaskFailedForGood(session, task, { outcome, message, retryable, finishedAt });
         result = { applied: true, outcome };
       });
 
@@ -621,6 +649,115 @@ export function createEngine({
         await enqueueRetrySafely(retryTask, result.delayMs);
       }
       return result;
+    },
+
+
+    /**
+     * HUMAN-IN-THE-LOOP, part 1: the worker's handler asked for approval.
+     * ONE transaction: RUNNING -> WAITING_FOR_APPROVAL (fenced by leaseToken),
+     * attempt closed, ApprovalRequest created (with the context the human
+     * needs, e.g. the AI's recommendation), event emitted. The task holds no
+     * lease and no worker while it waits: waiting costs nothing and survives
+     * any restart, because it's just a row in MongoDB.
+     */
+    async suspendForApproval({ taskId, leaseToken, request }) {
+      if (!ApprovalRequest) throw new Error("approvals not configured");
+      let applied = false;
+      await connection.transaction(async (session) => {
+        applied = false;
+        const finishedAt = now();
+        const won = await transitionTask(taskId, T.RUNNING, T.WAITING_FOR_APPROVAL, {
+          where: { leaseToken },
+          set: { leaseOwner: null, leaseExpiresAt: null },
+          session,
+        });
+        if (!won) return;
+        const task = await Task.findById(taskId, null, { session });
+        await TaskExecution.updateOne(
+          { taskId, attempt: task.attempt },
+          { $set: { status: ATTEMPT_STATUS.SUSPENDED, finishedAt, durationMs: task.startedAt ? finishedAt - task.startedAt : null } },
+          { session }
+        );
+        const [approval] = await ApprovalRequest.create(
+          [
+            {
+              taskId: task._id,
+              executionId: task.executionId,
+              ownerId: task.ownerId,
+              taskKey: task.key,
+              title: request.title,
+              message: request.message,
+              context: request.context,
+              expiresAt: new Date(finishedAt.getTime() + request.timeoutMs),
+            },
+          ],
+          { session }
+        );
+        await emit(session, "approval.requested", task.executionId, {
+          approvalId: String(approval._id),
+          taskId: String(task._id),
+          key: task.key,
+          expiresAt: approval.expiresAt,
+        });
+        applied = true;
+      });
+      return { applied };
+    },
+
+    /**
+     * HUMAN-IN-THE-LOOP, part 2: a decision (or the timeout).
+     * ONE transaction:
+     *   1. ApprovalRequest PENDING -> APPROVED | REJECTED | EXPIRED (compare-and-set:
+     *      two people clicking at once, or a click racing the timeout, can't
+     *      both win)
+     *   2. the task leaves WAITING_FOR_APPROVAL:
+     *        APPROVED          -> COMPLETED, then the normal success path (children run)
+     *        REJECTED/EXPIRED  -> FAILED (non-retryable), then the normal fail-fast path
+     *   If the task is no longer waiting (the run was cancelled), the whole
+     *   transaction aborts: the decision is NOT recorded.
+     *
+     * @returns {Promise<{ outcome: "APPROVED"|"REJECTED"|"EXPIRED"|null }>} null = lost the race / already decided
+     */
+    async resolveApproval({ approvalId, decision, decidedBy = null, comment = null, scope = {} }) {
+      if (!ApprovalRequest) throw new Error("approvals not configured");
+      let outcome = null;
+      let executionId = null;
+      await connection.transaction(async (session) => {
+        outcome = null;
+        const decidedAt = now();
+        const approval = await ApprovalRequest.findOneAndUpdate(
+          { _id: approvalId, status: "PENDING", ...scope },
+          { $set: { status: decision, decidedBy, decidedAt, comment } },
+          { returnDocument: "after", session }
+        );
+        if (!approval) return;
+
+        const approved = decision === "APPROVED";
+        const won = await transitionTask(approval.taskId, T.WAITING_FOR_APPROVAL, approved ? T.COMPLETED : T.FAILED, {
+          set: approved
+            ? { output: { approved: true, decidedBy: decidedBy && String(decidedBy), comment, decidedAt }, completedAt: decidedAt }
+            : { error: decision === "EXPIRED" ? "Approval timed out" : `Rejected by approver${comment ? `: ${comment}` : ""}`, completedAt: decidedAt },
+          session,
+        });
+        if (!won) {
+          throw new ConflictError("This task is no longer waiting for approval", { code: "APPROVAL_NOT_ACTIONABLE" });
+        }
+        const task = await Task.findById(approval.taskId, null, { session });
+        executionId = task.executionId;
+        if (approved) {
+          await afterTaskSucceeded(session, task, decidedAt);
+        } else {
+          await afterTaskFailedForGood(session, task, { outcome: T.FAILED, message: task.error, retryable: false, finishedAt: decidedAt });
+        }
+        await emit(session, `approval.${decision.toLowerCase()}`, task.executionId, {
+          approvalId: String(approval._id),
+          key: task.key,
+          decidedBy: decidedBy && String(decidedBy),
+        });
+        outcome = decision;
+      });
+      if (outcome === "APPROVED") await dispatchReady(executionId);
+      return { outcome };
     },
 
     /**
@@ -681,6 +818,19 @@ export function createEngine({
         .limit(limit);
       for (const task of overdueRetries) {
         if (await enqueueSafely(task)) counts.retrying += 1;
+      }
+
+      // 5. Approvals nobody answered in time -> EXPIRED (task fails, run fails fast).
+      if (ApprovalRequest) {
+        const overdue = await ApprovalRequest.find({ status: "PENDING", expiresAt: { $lt: new Date() } }).select("_id").limit(limit);
+        for (const a of overdue) {
+          try {
+            const r = await engine.resolveApproval({ approvalId: a._id, decision: "EXPIRED" });
+            if (r.outcome) counts.expiredApprovals = (counts.expiredApprovals ?? 0) + 1;
+          } catch (err) {
+            logger.warn({ approvalId: String(a._id), err: err.message }, "could not expire approval");
+          }
+        }
       }
 
       if (counts.ready + counts.running + counts.retrying > 0) logger.warn(counts, "reconciler re-dispatched tasks");

@@ -15,6 +15,9 @@
 // ones (HTTP calls, AI tasks, human approval) arrive in later phases.
 
 import { NonRetryableError } from "../workers/retry.js";
+import { AwaitApproval } from "../workers/approval.js";
+
+const DAY_MS = 24 * 3600 * 1000;
 
 const MAX_DELAY_MS = 60_000;
 
@@ -62,6 +65,21 @@ export const handlers = Object.freeze({
     if (attempt <= failTimes) throw new Error(`flaky failure on attempt ${attempt}/${failTimes}`);
     return { succeededOnAttempt: attempt };
   },
+
+  /**
+   * HUMAN APPROVAL GATE. Pauses this branch of the run until someone approves
+   * or rejects (POST /approvals/:id/approve|reject), or the timeout passes.
+   * config: { title?, message?, timeoutMs? (default 24h, max 7 days) }.
+   * The approver sees `context`: the outputs of this task's parents (e.g. the
+   * AI's recommendation). Output after approval: { approved, decidedBy, comment, decidedAt }.
+   */
+  "human.approval": async ({ config, parents }) =>
+    new AwaitApproval({
+      title: String(config.title ?? "Approval required").slice(0, 200),
+      message: String(config.message ?? "").slice(0, 2000),
+      context: parents,
+      timeoutMs: Math.min(Math.max(Number(config.timeoutMs) || DAY_MS, 1000), 7 * DAY_MS),
+    }),
 
   /** Returns what it received — shows data flowing between tasks. */
   echo: async ({ config, input, parents }) => ({ config, input, parents }),
