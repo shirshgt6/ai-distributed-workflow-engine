@@ -4,6 +4,8 @@ import { routeTask } from "../ai/router.js";
 import { generateStructured } from "../ai/structured.js";
 import { wrapUntrusted } from "../ai/prompts/safety.js";
 import { NonRetryableError } from "../workers/retry.js";
+import { runAgent } from "../ai/agent/agent.js";
+import { selectTools } from "../ai/agent/tools.js";
 
 /**
  * AI task handlers. Each is an ordinary workflow task: it gets
@@ -14,9 +16,10 @@ import { NonRetryableError } from "../workers/retry.js";
  * ProviderError.retryable flows straight into the engine's retry decision:
  * an Ollama timeout is retried with backoff, a 400 fails immediately.
  *
- * @param {{ provider, models: { small: string, large: string, embedding: string }, logger, rag? }} deps
+ * @param {{ provider, models: { small: string, large: string, embedding: string }, logger, rag?,
+ *           tools?: object, getUserRole?: (userId: string) => Promise<string|null> }} deps
  */
-export function createAiHandlers({ provider, models, rag }) {
+export function createAiHandlers({ provider, models, rag, tools, getUserRole }) {
   /** The request text: config.text, else input[config.inputField ?? "text"]. */
   function requestText({ config, input }) {
     const text = config.text ?? input?.[config.inputField ?? "text"];
@@ -59,6 +62,47 @@ export function createAiHandlers({ provider, models, rag }) {
      * route if present (so routing actually decides), else config.tier, else small.
      * Output: { answer, model, usage }.
      */
+    /**
+     * CONTROLLED AGENT. config: { tools?: string[] (allowlist), maxIterations?: 1-8 }.
+     * Tools = allowlist ∩ registry ∩ what the run OWNER's role permits.
+     * Output: { answer, iterations, steps[], deniedTools[], usage, model }.
+     * An agent that stops without an answer (max iterations / loop) fails the
+     * task, non-retryably: re-running the same goal would likely do the same.
+     */
+    "ai.agent": async (ctx) => {
+      if (!tools || !getUserRole) throw new NonRetryableError("Agent tools are not configured on this worker");
+      const role = await getUserRole(ctx.ownerId);
+      if (!role) throw new NonRetryableError("Run owner no longer exists");
+      let selection;
+      try {
+        selection = selectTools(tools, { allowlist: ctx.config.tools, role });
+      } catch (err) {
+        throw new NonRetryableError(err.message);
+      }
+      if (Object.keys(selection.allowed).length === 0) {
+        throw new NonRetryableError(`No permitted tools for role "${role}" (denied: ${selection.denied.join(", ")})`);
+      }
+      const route = Object.values(ctx.parents ?? {}).find((p) => p?.route)?.route;
+      const model = route?.mode === "agent" ? route.model : (models[ctx.config.tier ?? "large"] ?? models.large);
+      const maxIterations = Math.min(Math.max(Number(ctx.config.maxIterations) || 5, 1), 8);
+
+      const result = await runAgent({
+        provider,
+        model,
+        tools: selection.allowed,
+        goal: requestText(ctx),
+        ctx: { ownerId: ctx.ownerId },
+        maxIterations,
+        signal: ctx.signal,
+      });
+      if (result.status !== "final") {
+        const err = new NonRetryableError(`Agent stopped without an answer: ${result.status}`);
+        err.details = result.steps;
+        throw err;
+      }
+      return { answer: result.answer, iterations: result.iterations, steps: result.steps, deniedTools: selection.denied, usage: result.usage, model };
+    },
+
     "ai.generate": async (ctx) => {
       const route = Object.values(ctx.parents ?? {}).find((p) => p?.route)?.route;
       if (route && route.mode !== "direct") {

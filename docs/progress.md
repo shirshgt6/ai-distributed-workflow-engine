@@ -23,7 +23,7 @@ Only phases marked ✅ are implemented. Everything else is planned.
 | 17 | RAG ingestion pipeline | ✅ |
 | 18 | Qdrant retrieval | ✅ |
 | 19 | LangChain.js integration | ✅ |
-| 20 | Controlled AI agents + tools | ⬜ |
+| 20 | Controlled AI agents + tools | ✅ |
 | 21 | Human-in-the-loop | ⬜ |
 | 22 | AI retry/fallback | ⬜ |
 | 23 | LLM observability + analytics | ⬜ |
@@ -287,3 +287,10 @@ retrieved ids, refusal without evidence); the `ai.rag` handler (scoped to the ru
 made the small model return `grounded:false` for cited answers (fixed with v2 positive-first).
 **Honest limitation**: qwen2.5:0.5b is unreliable at citing sources for multi-paragraph chunks, so the system refuses rather
 than answer uncited. See docs/rag.md.
+
+## Phase 20 — Controlled AI agent + tools ✅
+**Implemented**: `runAgent` (structured steps, tool enum allowlist, arg validation, per-tool timeouts, truncation, max iterations,
+loop guard, overall timeout and abort); read-only tools (knowledge search, workflow status, safe calculator) scoped by the task's
+ownerId; `selectTools` (allowlist ∩ registry ∩ role); the `ai.agent` handler (no answer → non-retryable failure).
+**Tests**: 341 total. **Real model**: correct tool call, then a repeated call, stopped by the loop guard (3/3). The model is too small
+to finish; see docs/agents.md.
