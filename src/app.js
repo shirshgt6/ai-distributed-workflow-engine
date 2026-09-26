@@ -12,6 +12,7 @@ import { createAdminRouter } from "./routes/admin.routes.js";
 import { createKnowledgeRouter } from "./routes/knowledge.routes.js";
 import { createApprovalRouter } from "./routes/approval.routes.js";
 import { createAnalyticsRouter } from "./routes/analytics.routes.js";
+import { createDocsRouter } from "./routes/docs.routes.js";
 
 /**
  * Build the Express app WITHOUT starting a server or connecting to anything.
@@ -90,8 +91,11 @@ export function createApp({
     })
   );
 
-  // 3. Security headers (nosniff, frame protection, etc.).
-  app.use(helmet());
+  // 3. Security headers (nosniff, frame protection, etc.). Swagger UI needs
+  //    inline scripts/styles, so /docs gets a relaxed CSP; everything else keeps the strict default.
+  const strictHeaders = helmet();
+  const docsHeaders = helmet({ contentSecurityPolicy: false });
+  app.use((req, res, next) => (req.path.startsWith("/docs") ? docsHeaders(req, res, next) : strictHeaders(req, res, next)));
 
   // 4. JSON body parsing with a size cap. Without a limit, one client can
   //    POST a huge body and make the process buffer it all in memory.
@@ -104,6 +108,7 @@ export function createApp({
 
   // 5. Routes.
   app.use(healthRouter({ checks, isShuttingDown, logger }));
+  app.use(createDocsRouter()); // GET /docs (Swagger UI), GET /openapi.json
   if (auth) {
     // Every authenticated route also gets the per-user API rate limit.
     const verifyToken = createAuthenticate(auth.tokens);

@@ -1,0 +1,336 @@
+openapi: 3.1.0
+info:
+  title: AI Distributed Workflow Engine API
+  version: 1.0.0
+  description: |
+    Define workflows as DAGs of tasks, run them on horizontally scalable workers, and use AI tasks
+    (classification, routing, RAG, a controlled agent, human approval).
+
+    **Auth:** `POST /auth/login` returns an access token. Send it as `Authorization: Bearer <token>`.
+    **Errors:** every error is `{ "error": { "code", "message", "requestId", "details?" } }`. Branch on `code`.
+    **Ownership:** non-admins only see their own resources. Someone else's resource returns **404**, not 403.
+    **Rate limits:** `RateLimit-Limit` / `RateLimit-Remaining` headers; `429 RATE_LIMITED` with `Retry-After`.
+servers:
+  - url: http://localhost:4000
+tags:
+  - { name: Health }
+  - { name: Auth }
+  - { name: Workflows, description: Workflow definitions (versioned DAGs) and cron schedules }
+  - { name: Executions, description: Runs of a workflow }
+  - { name: Approvals, description: Human-in-the-loop }
+  - { name: Knowledge, description: RAG documents and retrieval }
+  - { name: Analytics }
+  - { name: Admin }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness (checks no dependencies)
+      security: []
+      responses:
+        "200": { description: Process is alive }
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness (MongoDB, Redis, Qdrant); 503 while shutting down
+      security: []
+      responses:
+        "200": { description: Ready }
+        "503": { description: A dependency is down, or the process is shutting down }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register (always creates a viewer)
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Credentials" } } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { type: object, properties: { user: { $ref: "#/components/schemas/User" } } } } } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { description: EMAIL_TAKEN }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in (limited per IP+email and per IP)
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Credentials" } } } }
+      responses:
+        "200": { description: Tokens, content: { application/json: { schema: { $ref: "#/components/schemas/Tokens" } } } }
+        "401": { description: INVALID_CREDENTIALS (same response for an unknown email and a wrong password) }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Exchange a refresh token for a new pair
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [refreshToken], properties: { refreshToken: { type: string } } } } } }
+      responses:
+        "200": { description: New tokens, content: { application/json: { schema: { $ref: "#/components/schemas/Tokens" } } } }
+        "401": { description: INVALID_TOKEN / TOKEN_EXPIRED / TOKEN_REVOKED }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke all refresh tokens of the user
+      responses:
+        "204": { description: Logged out everywhere }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      responses:
+        "200": { description: The user, content: { application/json: { schema: { type: object, properties: { user: { $ref: "#/components/schemas/User" } } } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /users/{id}/role:
+    patch:
+      tags: [Admin]
+      summary: Change a user's role (admin; revokes their refresh tokens)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [role], properties: { role: { $ref: "#/components/schemas/Role" } } } } } }
+      responses:
+        "200": { description: Updated user }
+        "403": { description: FORBIDDEN / SELF_ROLE_CHANGE }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /workflows:
+    post:
+      tags: [Workflows]
+      summary: Create a workflow (shape + DAG validated)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowInput" } } } }
+      responses:
+        "201": { description: "Created (Location header)", content: { application/json: { schema: { type: object, properties: { workflow: { $ref: "#/components/schemas/Workflow" } } } } } }
+        "400": { description: VALIDATION_ERROR or INVALID_WORKFLOW_GRAPH (cycle, unknown or duplicate dependency, duplicate key) }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    get:
+      tags: [Workflows]
+      summary: "List my workflows (admin: all)"
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+      responses:
+        "200": { description: "{ items, page, limit, total }" }
+  /workflows/validate:
+    post:
+      tags: [Workflows]
+      summary: Dry-run DAG analysis (order, parallel levels, critical path); nothing saved
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowInput" } } } }
+      responses:
+        "200": { description: "{ valid, errors[], order[], levels[][], criticalPathLength }" }
+  /workflows/{id}:
+    get:
+      tags: [Workflows]
+      summary: Get a workflow
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: The workflow }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Workflows]
+      summary: Replace the definition (optimistic concurrency with `version`)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { allOf: [{ $ref: "#/components/schemas/WorkflowInput" }, { type: object, required: [version], properties: { version: { type: integer } } }] } } }
+      responses:
+        "200": { description: Updated, version + 1 }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: VERSION_CONFLICT (details.currentVersion) }
+  /workflows/{id}/schedule:
+    put:
+      tags: [Workflows]
+      summary: Set a cron schedule (5-field cron, IANA timezone)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [cron], properties: { cron: { type: string, example: "0 2 * * *" }, timezone: { type: string, example: Asia/Kolkata }, enabled: { type: boolean }, input: { type: object } } } } }
+      responses:
+        "200": { description: Workflow with schedule.nextRunAt }
+        "400": { description: INVALID_CRON }
+    delete:
+      tags: [Workflows]
+      summary: Remove the schedule
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Workflow without a schedule }
+  /workflows/{id}/run:
+    post:
+      tags: [Executions]
+      summary: Start a run (asynchronous; idempotent with Idempotency-Key)
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: Idempotency-Key, in: header, required: false, schema: { type: string, minLength: 8, maxLength: 128 }, description: "Same key + same body -> same run (Idempotent-Replayed: true)" }
+      requestBody: { content: { application/json: { schema: { type: object, properties: { input: { type: object } } } } } }
+      responses:
+        "202": { description: "Run started (Location /executions/{id})", content: { application/json: { schema: { type: object, properties: { execution: { $ref: "#/components/schemas/Execution" } } } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { description: IDEMPOTENCY_KEY_REUSED (same key, different request) }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /executions/{id}:
+    get:
+      tags: [Executions]
+      summary: Run status with all task states, attempts, outputs, errors
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: "{ execution, tasks[] }" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /executions/{id}/pause:
+    post: { tags: [Executions], summary: Stop scheduling new tasks, parameters: [{ $ref: "#/components/parameters/Id" }], responses: { "200": { description: PAUSED }, "409": { description: INVALID_STATE } } }
+  /executions/{id}/resume:
+    post: { tags: [Executions], summary: Resume a paused run, parameters: [{ $ref: "#/components/parameters/Id" }], responses: { "200": { description: RUNNING (or COMPLETED) }, "409": { description: INVALID_STATE } } }
+  /executions/{id}/cancel:
+    post: { tags: [Executions], summary: Cancel every unfinished task (running handlers abort at their next lease renewal), parameters: [{ $ref: "#/components/parameters/Id" }], responses: { "200": { description: CANCELLED }, "409": { description: INVALID_STATE } } }
+
+  /approvals:
+    get:
+      tags: [Approvals]
+      summary: My approval requests
+      parameters: [{ name: status, in: query, schema: { type: string, enum: [PENDING, APPROVED, REJECTED, EXPIRED, CANCELLED] } }]
+      responses:
+        "200": { description: "{ approvals[] }" }
+  /approvals/{id}:
+    get:
+      tags: [Approvals]
+      summary: One approval request, incl. context (parents' outputs, e.g. the AI recommendation)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: "{ approval }" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /approvals/{id}/approve:
+    post:
+      tags: [Approvals]
+      summary: Approve; the run resumes
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { comment: { type: string, maxLength: 1000 } } } } } }
+      responses:
+        "200": { description: APPROVED }
+        "409": { description: ALREADY_DECIDED (someone else, the timeout, or cancellation got there first) }
+  /approvals/{id}/reject:
+    post:
+      tags: [Approvals]
+      summary: Reject; the approval task fails and the run fails fast
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { comment: { type: string, maxLength: 1000 } } } } } }
+      responses:
+        "200": { description: REJECTED }
+        "409": { description: ALREADY_DECIDED }
+
+  /documents:
+    post:
+      tags: [Knowledge]
+      summary: Upload a text/markdown document (chunked, embedded, stored in Qdrant)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [title, content], properties: { title: { type: string }, mimeType: { type: string, enum: [text/plain, text/markdown] }, content: { type: string, minLength: 20, maxLength: 200000 } } } } }
+      responses:
+        "201": { description: READY document }
+        "409": { description: DUPLICATE_DOCUMENT }
+        "413": { description: PAYLOAD_TOO_LARGE (256 KB) }
+    get:
+      tags: [Knowledge]
+      summary: My documents
+      responses: { "200": { description: "{ documents[] }" } }
+  /documents/{id}:
+    get:
+      tags: [Knowledge]
+      summary: One document
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: "{ document }" }, "404": { $ref: "#/components/responses/NotFound" } }
+    delete:
+      tags: [Knowledge]
+      summary: Delete a document and its vectors
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "204": { description: Deleted }, "404": { $ref: "#/components/responses/NotFound" } }
+  /knowledge/search:
+    post:
+      tags: [Knowledge]
+      summary: Retrieval only (no LLM), within my documents
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [query], properties: { query: { type: string }, topK: { type: integer, minimum: 1, maximum: 20 } } } } } }
+      responses: { "200": { description: "{ results: [{ score, title, chunkIndex, text }] }" } }
+
+  /analytics/ai:
+    get:
+      tags: [Analytics]
+      summary: LLM usage per model (calls, error rate, fallbacks, avg/p95 latency, tokens, estimated cost)
+      parameters: [{ $ref: "#/components/parameters/Days" }]
+      responses: { "200": { description: "{ totals, models[], byTaskType[] }" } }
+  /analytics/workflows:
+    get:
+      tags: [Analytics]
+      summary: Runs by status, success rate, durations, retries, top failing task types
+      parameters: [{ $ref: "#/components/parameters/Days" }]
+      responses: { "200": { description: "{ executions, successRate, durationMs, attempts, topFailingTaskTypes }" } }
+
+  /workers:
+    get:
+      tags: [Admin]
+      summary: Worker registry (ACTIVE / UNRESPONSIVE / STOPPED)
+      responses: { "200": { description: "{ workers[] }" }, "403": { $ref: "#/components/responses/Forbidden" } }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, pattern: "^[a-f0-9]{24}$" } }
+    Days: { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 90, default: 7 } }
+  responses:
+    ValidationError: { description: VALIDATION_ERROR, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Unauthenticated: { description: UNAUTHENTICATED / INVALID_TOKEN / TOKEN_EXPIRED, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Forbidden: { description: FORBIDDEN (role lacks the permission), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    NotFound: { description: NOT_FOUND (missing, or not yours), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    RateLimited: { description: RATE_LIMITED (see Retry-After), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: object, properties: { code: { type: string }, message: { type: string }, requestId: { type: string }, details: {} } }
+    Role: { type: string, enum: [admin, operator, viewer] }
+    Credentials:
+      type: object
+      required: [email, password]
+      properties: { email: { type: string, format: email }, password: { type: string, minLength: 8 } }
+    Tokens:
+      type: object
+      properties: { tokenType: { type: string, example: Bearer }, accessToken: { type: string }, expiresIn: { type: string, example: 15m }, refreshToken: { type: string } }
+    User:
+      type: object
+      properties: { id: { type: string }, email: { type: string }, role: { $ref: "#/components/schemas/Role" } }
+    TaskDefinition:
+      type: object
+      required: [key, type]
+      properties:
+        key: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" }
+        type:
+          type: string
+          description: "Built-in: noop, delay, fail, flaky, echo, human.approval, ai.classify, ai.route, ai.generate, ai.rag, ai.agent"
+        dependsOn: { type: array, items: { type: string } }
+        config: { type: object }
+        retryPolicy: { type: object, properties: { maxAttempts: { type: integer, minimum: 1, maximum: 10 }, baseDelayMs: { type: integer } } }
+        timeoutMs: { type: integer, minimum: 100, maximum: 3600000 }
+    WorkflowInput:
+      type: object
+      required: [name, tasks]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        tasks: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/TaskDefinition" } }
+    Workflow:
+      allOf:
+        - { $ref: "#/components/schemas/WorkflowInput" }
+        - type: object
+          properties: { id: { type: string }, ownerId: { type: string }, version: { type: integer }, schedule: { type: object } }
+    Execution:
+      type: object
+      properties:
+        id: { type: string }
+        workflowId: { type: string }
+        workflowVersion: { type: integer }
+        status: { type: string, enum: [PENDING, RUNNING, PAUSED, WAITING_FOR_APPROVAL, COMPLETED, FAILED, CANCELLED] }
+        trigger: { type: string, enum: [manual, schedule] }
+        taskCount: { type: integer }
+        pendingTasks: { type: integer }
+        error: { type: string }

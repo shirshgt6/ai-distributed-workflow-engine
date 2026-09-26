@@ -1,6 +1,8 @@
 # API Design
 
-Only implemented endpoints are listed. An OpenAPI/Swagger spec comes in Phase 27.
+Only implemented endpoints are listed. **Interactive docs:** `GET /docs` (Swagger UI), with the machine-readable spec at
+`GET /openapi.json` (source: `src/docs/openapi.yaml`). A unit test fails if any registered route is missing from the spec,
+or if the spec lists a route that doesn't exist.
 
 ## Conventions
 
