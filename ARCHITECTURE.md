@@ -70,7 +70,7 @@ Verified by race tests, mutation checks, crash-simulation tests and a chaos test
 | Data model | [docs/database-design.md](docs/database-design.md) |
 | API | [docs/api-design.md](docs/api-design.md) · live at `/docs` |
 | Decisions | [docs/decisions.md](docs/decisions.md) |
-| Interview prep | [docs/interview-guide.md](docs/interview-guide.md) · [docs/phase-summaries.md](docs/phase-summaries.md) |
+| Interview prep | [docs/interview-guide.md](docs/interview-guide.md) · [docs/revision-sheet.md](docs/revision-sheet.md) · [docs/phase-summaries.md](docs/phase-summaries.md) |
 
 ## Not built (by design or out of scope)
 - **High availability:** single-node MongoDB, Redis, Kafka and Qdrant locally. Production needs replicas.
